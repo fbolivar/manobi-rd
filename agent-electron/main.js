@@ -25,6 +25,9 @@ app.on('second-instance', () => {
   if (mainWindow) mainWindow.show();
 });
 
+app.commandLine.appendSwitch('disable-gpu');
+app.commandLine.appendSwitch('disable-software-rasterizer');
+
 app.whenReady().then(() => {
   createWindow();
   createTray();
@@ -230,30 +233,32 @@ function startStreaming(sessionId) {
     try {
       const sources = await desktopCapturer.getSources({
         types: ['screen'],
-        thumbnailSize: { width: 960, height: 540 },
+        thumbnailSize: { width: 800, height: 450 },
       });
 
       if (sources.length > 0) {
         const thumbnail = sources[0].thumbnail;
-        const jpegBuffer = thumbnail.toJPEG(30);
-        const base64 = jpegBuffer.toString('base64');
+        if (!thumbnail.isEmpty()) {
+          const jpegBuffer = thumbnail.toJPEG(25);
+          const base64 = jpegBuffer.toString('base64');
 
-        if (base64.length !== lastSize) {
-          lastSize = base64.length;
-          socket.volatile.emit('screen:frame', {
-            sessionId,
-            frame: base64,
-            width: screenSize.width,
-            height: screenSize.height,
-            timestamp: Date.now(),
-          });
+          if (base64.length !== lastSize) {
+            lastSize = base64.length;
+            socket.volatile.emit('screen:frame', {
+              sessionId,
+              frame: base64,
+              width: screenSize.width,
+              height: screenSize.height,
+              timestamp: Date.now(),
+            });
+          }
         }
       }
     } catch (err) {
-      console.error('Error capturando:', err.message);
+      // Ignorar errores DXGI, el siguiente intento puede funcionar
     }
 
-    if (isStreaming) setTimeout(captureLoop, 80); // ~12 FPS
+    if (isStreaming) setTimeout(captureLoop, 200); // ~5 FPS estable
   }
 
   captureLoop();
