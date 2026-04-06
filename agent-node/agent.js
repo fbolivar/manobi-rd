@@ -375,6 +375,12 @@ function handleKeyboardInput(data) {
     return;
   }
 
+  // Espacio
+  if (key === ' ') {
+    sendInputCmd('T { }');
+    return;
+  }
+
   // Caracteres normales (letras, números, puntos, comas, etc) -> usar SendKeys
   if (key.length === 1) {
     // Escapar caracteres especiales de SendKeys: + ^ % ~ { } [ ] ( )
@@ -384,11 +390,6 @@ function handleKeyboardInput(data) {
     }
     sendInputCmd(`T ${sendKey}`);
     return;
-  }
-
-  // Espacio
-  if (key === ' ') {
-    sendInputCmd('K 32');
   }
 }
 
