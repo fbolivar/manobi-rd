@@ -381,35 +381,42 @@ function handleKeyboardInput(data) {
 // TRANSFERENCIA DE ARCHIVOS
 // ============================================
 function setupFileTransfer(socket) {
-  socket.on('file:upload', (data, callback) => {
-    const targetPath = data.destPath || path.join(os.homedir(), 'Desktop', data.fileName);
-    try {
-      fs.writeFileSync(targetPath, Buffer.from(data.fileData, 'base64'));
-      console.log(`📁 Archivo recibido: ${data.fileName}`);
-      if (callback) callback({ success: true, path: targetPath });
-    } catch (err) {
-      if (callback) callback({ success: false, error: err.message });
-    }
-  });
-
-  socket.on('file:download', (data, callback) => {
-    try {
-      const buffer = fs.readFileSync(data.filePath);
-      if (callback) callback({ success: true, fileName: path.basename(data.filePath), fileData: buffer.toString('base64'), size: fs.statSync(data.filePath).size });
-    } catch (err) {
-      if (callback) callback({ success: false, error: err.message });
-    }
-  });
-
-  socket.on('file:list', (data, callback) => {
+  socket.on('file:list:request', (data) => {
     const dirPath = data.path || os.homedir();
     try {
       const items = fs.readdirSync(dirPath, { withFileTypes: true })
         .filter(i => !i.name.startsWith('.'))
+        .slice(0, 100)
         .map(i => ({ name: i.name, isDirectory: i.isDirectory(), path: path.join(dirPath, i.name) }));
-      if (callback) callback({ success: true, items, currentPath: dirPath });
+      socket.emit('file:list:result', { requesterId: data.requesterId, success: true, items, currentPath: dirPath });
     } catch (err) {
-      if (callback) callback({ success: false, error: err.message });
+      socket.emit('file:list:result', { requesterId: data.requesterId, success: false, error: err.message });
+    }
+  });
+
+  socket.on('file:download:request', (data) => {
+    try {
+      const buffer = fs.readFileSync(data.filePath);
+      console.log(`📁 Enviando: ${data.filePath}`);
+      socket.emit('file:download:result', {
+        requesterId: data.requesterId,
+        success: true,
+        fileName: path.basename(data.filePath),
+        fileData: buffer.toString('base64'),
+      });
+    } catch (err) {
+      socket.emit('file:download:result', { requesterId: data.requesterId, success: false, error: err.message });
+    }
+  });
+
+  socket.on('file:upload:request', (data) => {
+    const targetPath = data.destPath || path.join(os.homedir(), 'Desktop', data.fileName);
+    try {
+      fs.writeFileSync(targetPath, Buffer.from(data.fileData, 'base64'));
+      console.log(`📁 Recibido: ${data.fileName}`);
+      socket.emit('file:upload:result', { requesterId: data.requesterId, success: true });
+    } catch (err) {
+      socket.emit('file:upload:result', { requesterId: data.requesterId, success: false, error: err.message });
     }
   });
 }

@@ -290,7 +290,7 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   }
 
   // ==========================================
-  // TRANSFERENCIA DE ARCHIVOS - Reenviar al agente
+  // TRANSFERENCIA DE ARCHIVOS
   // ==========================================
 
   @SubscribeMessage('file:list')
@@ -303,12 +303,17 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       client.emit('file:list:response', { success: false, error: 'Dispositivo no conectado' });
       return;
     }
-    // Reenviar al agente y esperar respuesta
-    const agentSocket = this.server.sockets.sockets.get(agentSocketId);
-    if (agentSocket) {
-      agentSocket.emit('file:list', { path: data.path }, (response: unknown) => {
-        client.emit('file:list:response', response);
-      });
+    this.server.to(agentSocketId).emit('file:list:request', { path: data.path, requesterId: client.userId });
+  }
+
+  @SubscribeMessage('file:list:result')
+  handleFileListResult(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { requesterId: string; success: boolean; items?: unknown[]; currentPath?: string; error?: string },
+  ) {
+    const viewerSocketId = this.userSockets.get(data.requesterId);
+    if (viewerSocketId) {
+      this.server.to(viewerSocketId).emit('file:list:response', data);
     }
   }
 
@@ -322,11 +327,17 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       client.emit('file:download:response', { success: false, error: 'Dispositivo no conectado' });
       return;
     }
-    const agentSocket = this.server.sockets.sockets.get(agentSocketId);
-    if (agentSocket) {
-      agentSocket.emit('file:download', { filePath: data.filePath }, (response: unknown) => {
-        client.emit('file:download:response', response);
-      });
+    this.server.to(agentSocketId).emit('file:download:request', { filePath: data.filePath, requesterId: client.userId });
+  }
+
+  @SubscribeMessage('file:download:result')
+  handleFileDownloadResult(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { requesterId: string; success: boolean; fileName?: string; fileData?: string; error?: string },
+  ) {
+    const viewerSocketId = this.userSockets.get(data.requesterId);
+    if (viewerSocketId) {
+      this.server.to(viewerSocketId).emit('file:download:response', data);
     }
   }
 
@@ -340,11 +351,17 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       client.emit('file:upload:response', { success: false, error: 'Dispositivo no conectado' });
       return;
     }
-    const agentSocket = this.server.sockets.sockets.get(agentSocketId);
-    if (agentSocket) {
-      agentSocket.emit('file:upload', { fileName: data.fileName, fileData: data.fileData, destPath: data.destPath }, (response: unknown) => {
-        client.emit('file:upload:response', response);
-      });
+    this.server.to(agentSocketId).emit('file:upload:request', { fileName: data.fileName, fileData: data.fileData, destPath: data.destPath, requesterId: client.userId });
+  }
+
+  @SubscribeMessage('file:upload:result')
+  handleFileUploadResult(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { requesterId: string; success: boolean; error?: string },
+  ) {
+    const viewerSocketId = this.userSockets.get(data.requesterId);
+    if (viewerSocketId) {
+      this.server.to(viewerSocketId).emit('file:upload:response', data);
     }
   }
 
