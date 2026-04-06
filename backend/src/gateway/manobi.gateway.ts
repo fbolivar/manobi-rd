@@ -290,6 +290,65 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   }
 
   // ==========================================
+  // TRANSFERENCIA DE ARCHIVOS - Reenviar al agente
+  // ==========================================
+
+  @SubscribeMessage('file:list')
+  handleFileList(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { deviceId: string; path?: string },
+  ) {
+    const agentSocketId = this.agentSockets.get(data.deviceId);
+    if (!agentSocketId) {
+      client.emit('file:list:response', { success: false, error: 'Dispositivo no conectado' });
+      return;
+    }
+    // Reenviar al agente y esperar respuesta
+    const agentSocket = this.server.sockets.sockets.get(agentSocketId);
+    if (agentSocket) {
+      agentSocket.emit('file:list', { path: data.path }, (response: unknown) => {
+        client.emit('file:list:response', response);
+      });
+    }
+  }
+
+  @SubscribeMessage('file:download')
+  handleFileDownload(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { deviceId: string; filePath: string },
+  ) {
+    const agentSocketId = this.agentSockets.get(data.deviceId);
+    if (!agentSocketId) {
+      client.emit('file:download:response', { success: false, error: 'Dispositivo no conectado' });
+      return;
+    }
+    const agentSocket = this.server.sockets.sockets.get(agentSocketId);
+    if (agentSocket) {
+      agentSocket.emit('file:download', { filePath: data.filePath }, (response: unknown) => {
+        client.emit('file:download:response', response);
+      });
+    }
+  }
+
+  @SubscribeMessage('file:upload')
+  handleFileUpload(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { deviceId: string; fileName: string; fileData: string; destPath?: string },
+  ) {
+    const agentSocketId = this.agentSockets.get(data.deviceId);
+    if (!agentSocketId) {
+      client.emit('file:upload:response', { success: false, error: 'Dispositivo no conectado' });
+      return;
+    }
+    const agentSocket = this.server.sockets.sockets.get(agentSocketId);
+    if (agentSocket) {
+      agentSocket.emit('file:upload', { fileName: data.fileName, fileData: data.fileData, destPath: data.destPath }, (response: unknown) => {
+        client.emit('file:upload:response', response);
+      });
+    }
+  }
+
+  // ==========================================
   // FINALIZAR SESIÓN
   // ==========================================
 

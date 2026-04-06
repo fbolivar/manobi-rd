@@ -230,15 +230,17 @@ export default function ControlRemotoPage() {
   }
 
   // ==========================================
-  // ARCHIVOS
+  // ARCHIVOS - via eventos WebSocket
   // ==========================================
   function listFiles(dirPath?: string) {
-    socketRef.current.emit('file:list', { path: dirPath || '' }, (res: { success: boolean; items?: FileItem[]; currentPath?: string; error?: string }) => {
+    const socket = socketRef.current;
+    socket.once('file:list:response', (res: { success: boolean; items?: FileItem[]; currentPath?: string }) => {
       if (res.success && res.items) {
         setFiles(res.items);
         setCurrentPath(res.currentPath || '');
       }
     });
+    socket.emit('file:list', { deviceId, path: dirPath || '' });
   }
 
   function navigateToDir(dirPath: string) {
@@ -246,14 +248,14 @@ export default function ControlRemotoPage() {
   }
 
   function goUpDir() {
-    const parent = currentPath.replace(/[\\/][^\\/]+$/, '') || (process.platform === 'win32' ? 'C:\\' : '/');
+    const parent = currentPath.replace(/[\\/][^\\/]+$/, '') || 'C:\\';
     listFiles(parent);
   }
 
   function downloadFile(filePath: string) {
-    socketRef.current.emit('file:download', { filePath }, (res: { success: boolean; fileName?: string; fileData?: string; error?: string }) => {
+    const socket = socketRef.current;
+    socket.once('file:download:response', (res: { success: boolean; fileName?: string; fileData?: string; error?: string }) => {
       if (res.success && res.fileData && res.fileName) {
-        // Descargar al navegador
         const link = document.createElement('a');
         link.href = `data:application/octet-stream;base64,${res.fileData}`;
         link.download = res.fileName;
@@ -262,6 +264,7 @@ export default function ControlRemotoPage() {
         alert('Error descargando: ' + (res.error || 'desconocido'));
       }
     });
+    socket.emit('file:download', { deviceId, filePath });
   }
 
   function uploadFile() {
@@ -275,17 +278,20 @@ export default function ControlRemotoPage() {
       const reader = new FileReader();
       reader.onload = () => {
         const base64 = (reader.result as string).split(',')[1];
-        socketRef.current.emit('file:upload', {
-          fileName: file.name,
-          fileData: base64,
-          destPath: currentPath ? `${currentPath}\\${file.name}` : '',
-        }, (res: { success: boolean; path?: string; error?: string }) => {
+        const socket = socketRef.current;
+        socket.once('file:upload:response', (res: { success: boolean; error?: string }) => {
           setUploading(false);
           if (res.success) {
-            listFiles(currentPath); // Refrescar
+            listFiles(currentPath);
           } else {
             alert('Error subiendo: ' + (res.error || 'desconocido'));
           }
+        });
+        socket.emit('file:upload', {
+          deviceId,
+          fileName: file.name,
+          fileData: base64,
+          destPath: currentPath ? `${currentPath}\\${file.name}` : '',
         });
       };
       reader.readAsDataURL(file);
@@ -300,12 +306,6 @@ export default function ControlRemotoPage() {
       setRightPanel('files');
       listFiles();
     }
-  }
-
-  function formatSize(bytes: number): string {
-    if (bytes < 1024) return bytes + ' B';
-    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
-    return (bytes / 1048576).toFixed(1) + ' MB';
   }
 
   return (
