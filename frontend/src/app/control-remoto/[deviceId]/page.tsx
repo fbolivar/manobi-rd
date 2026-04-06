@@ -5,6 +5,12 @@ import { useParams, useRouter } from 'next/navigation';
 import { api, type Dispositivo, type Mensaje } from '@/lib/api';
 import { getSocket } from '@/lib/socket';
 
+interface FileItem {
+  name: string;
+  isDirectory: boolean;
+  path: string;
+}
+
 export default function ControlRemotoPage() {
   const params = useParams();
   const router = useRouter();
@@ -12,6 +18,7 @@ export default function ControlRemotoPage() {
 
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const imgRef = useRef<HTMLImageElement | null>(null);
+  const chatEndRef = useRef<HTMLDivElement>(null);
 
   const [device, setDevice] = useState<Dispositivo | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
@@ -19,26 +26,32 @@ export default function ControlRemotoPage() {
   const [fps, setFps] = useState(0);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
   const [nuevoMensaje, setNuevoMensaje] = useState('');
-  const [showChat, setShowChat] = useState(false);
+  const [rightPanel, setRightPanel] = useState<'none' | 'chat' | 'files'>('none');
   const [fullscreen, setFullscreen] = useState(false);
+  const [inputEnabled, setInputEnabled] = useState(true);
 
-  const socket = getSocket();
+  // Archivos
+  const [files, setFiles] = useState<FileItem[]>([]);
+  const [currentPath, setCurrentPath] = useState('');
+  const [uploading, setUploading] = useState(false);
+
+  const socketRef = useRef(getSocket());
   const frameCountRef = useRef(0);
   const sessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     loadDevice();
-
-    // Precrear imagen para renderizar frames
     imgRef.current = new Image();
 
     return () => {
+      const s = socketRef.current;
       if (sessionIdRef.current) {
-        socket.emit('control:finalizar', { sessionId: sessionIdRef.current, deviceId });
+        s.emit('control:finalizar', { sessionId: sessionIdRef.current, deviceId });
       }
-      socket.off('screen:frame');
-      socket.off('control:sesion-creada');
-      socket.off('control:error');
+      s.off('screen:frame');
+      s.off('control:sesion-creada');
+      s.off('control:error');
+      s.off('control:finalizado');
     };
   }, [deviceId]);
 
@@ -51,17 +64,23 @@ export default function ControlRemotoPage() {
     return () => clearInterval(interval);
   }, []);
 
+  // Auto-scroll del chat
+  useEffect(() => {
+    chatEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+  }, [mensajes]);
+
   async function loadDevice() {
     try {
       const d = await api.getDispositivo(deviceId);
       setDevice(d);
     } catch {
-      router.push('/dispositivos');
+      router.push('/panel');
     }
   }
 
   function startSession() {
-    // Escuchar frames de pantalla
+    const socket = socketRef.current;
+
     socket.on('screen:frame', (data: { frame: string; width: number; height: number }) => {
       renderFrame(data.frame, data.width, data.height);
       frameCountRef.current++;
@@ -72,7 +91,6 @@ export default function ControlRemotoPage() {
       sessionIdRef.current = data.sessionId;
       setConnected(true);
 
-      // Escuchar chat de esta sesión
       socket.on(`chat:${data.sessionId}`, (msg: Mensaje) => {
         setMensajes((prev) => [...prev, msg]);
       });
@@ -82,7 +100,12 @@ export default function ControlRemotoPage() {
       alert(data.message);
     });
 
-    // Solicitar control
+    socket.on('control:finalizado', () => {
+      setConnected(false);
+      setSessionId(null);
+      sessionIdRef.current = null;
+    });
+
     socket.emit('control:solicitar', { deviceId });
   }
 
@@ -94,13 +117,11 @@ export default function ControlRemotoPage() {
     const ctx = canvas.getContext('2d');
     if (!ctx) return;
 
-    // Ajustar tamaño del canvas
-    if (canvas.width !== width || canvas.height !== height) {
+    if (canvas.width !== (width || 1280) || canvas.height !== (height || 720)) {
       canvas.width = width || 1280;
       canvas.height = height || 720;
     }
 
-    // Detectar formato (JPEG base64 o SVG)
     const isJpeg = !frameBase64.startsWith('PHN2');
     const src = isJpeg
       ? `data:image/jpeg;base64,${frameBase64}`
@@ -113,6 +134,7 @@ export default function ControlRemotoPage() {
   }
 
   function endSession() {
+    const socket = socketRef.current;
     if (sessionId) {
       socket.emit('control:finalizar', { sessionId, deviceId });
       socket.off('screen:frame');
@@ -123,29 +145,36 @@ export default function ControlRemotoPage() {
     }
   }
 
-  // Enviar eventos de mouse sobre el canvas
+  // ==========================================
+  // MOUSE
+  // ==========================================
   const handleMouseEvent = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!connected || !canvasRef.current) return;
+    if (!connected || !inputEnabled || !canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
 
-    socket.emit('input:mouse', {
+    socketRef.current.emit('input:mouse', {
       deviceId,
-      x,
-      y,
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
       type: e.type,
       button: e.button,
     });
-  }, [connected, deviceId, socket]);
+  }, [connected, inputEnabled, deviceId]);
 
-  // Enviar eventos de teclado
+  // ==========================================
+  // TECLADO
+  // ==========================================
   useEffect(() => {
-    if (!connected) return;
+    if (!connected || !inputEnabled) return;
 
     function handleKeyEvent(e: KeyboardEvent) {
+      // No capturar teclas si estamos en el chat
+      if ((e.target as HTMLElement)?.tagName === 'INPUT' || (e.target as HTMLElement)?.tagName === 'TEXTAREA') return;
+
       e.preventDefault();
-      socket.emit('input:teclado', {
+      socketRef.current.emit('input:teclado', {
         deviceId,
         key: e.key,
         type: e.type,
@@ -164,54 +193,168 @@ export default function ControlRemotoPage() {
       window.removeEventListener('keydown', handleKeyEvent);
       window.removeEventListener('keyup', handleKeyEvent);
     };
-  }, [connected, deviceId, socket]);
+  }, [connected, inputEnabled, deviceId]);
 
-  async function sendMessage(e: React.FormEvent) {
+  // ==========================================
+  // CHAT
+  // ==========================================
+  function sendMessage(e: React.FormEvent) {
     e.preventDefault();
     if (!nuevoMensaje.trim() || !sessionId) return;
-    await api.enviarMensaje(sessionId, nuevoMensaje);
+
+    socketRef.current.emit('chat:mensaje', {
+      sessionId,
+      contenido: nuevoMensaje,
+    });
+
     setNuevoMensaje('');
   }
 
+  // ==========================================
+  // ARCHIVOS
+  // ==========================================
+  function listFiles(dirPath?: string) {
+    socketRef.current.emit('file:list', { path: dirPath || '' }, (res: { success: boolean; items?: FileItem[]; currentPath?: string; error?: string }) => {
+      if (res.success && res.items) {
+        setFiles(res.items);
+        setCurrentPath(res.currentPath || '');
+      }
+    });
+  }
+
+  function navigateToDir(dirPath: string) {
+    listFiles(dirPath);
+  }
+
+  function goUpDir() {
+    const parent = currentPath.replace(/[\\/][^\\/]+$/, '') || (process.platform === 'win32' ? 'C:\\' : '/');
+    listFiles(parent);
+  }
+
+  function downloadFile(filePath: string) {
+    socketRef.current.emit('file:download', { filePath }, (res: { success: boolean; fileName?: string; fileData?: string; error?: string }) => {
+      if (res.success && res.fileData && res.fileName) {
+        // Descargar al navegador
+        const link = document.createElement('a');
+        link.href = `data:application/octet-stream;base64,${res.fileData}`;
+        link.download = res.fileName;
+        link.click();
+      } else {
+        alert('Error descargando: ' + (res.error || 'desconocido'));
+      }
+    });
+  }
+
+  function uploadFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.onchange = (e) => {
+      const file = (e.target as HTMLInputElement).files?.[0];
+      if (!file) return;
+
+      setUploading(true);
+      const reader = new FileReader();
+      reader.onload = () => {
+        const base64 = (reader.result as string).split(',')[1];
+        socketRef.current.emit('file:upload', {
+          fileName: file.name,
+          fileData: base64,
+          destPath: currentPath ? `${currentPath}\\${file.name}` : '',
+        }, (res: { success: boolean; path?: string; error?: string }) => {
+          setUploading(false);
+          if (res.success) {
+            listFiles(currentPath); // Refrescar
+          } else {
+            alert('Error subiendo: ' + (res.error || 'desconocido'));
+          }
+        });
+      };
+      reader.readAsDataURL(file);
+    };
+    input.click();
+  }
+
+  function openFilesPanel() {
+    if (rightPanel === 'files') {
+      setRightPanel('none');
+    } else {
+      setRightPanel('files');
+      listFiles();
+    }
+  }
+
+  function formatSize(bytes: number): string {
+    if (bytes < 1024) return bytes + ' B';
+    if (bytes < 1048576) return (bytes / 1024).toFixed(1) + ' KB';
+    return (bytes / 1048576).toFixed(1) + ' MB';
+  }
+
   return (
-    <div className={`${fullscreen ? 'fixed inset-0 z-50 bg-black' : ''}`}>
-      {/* Barra superior */}
-      <div className="flex items-center justify-between p-4 bg-gray-900 border-b border-gray-800">
+    <div className={`flex flex-col h-screen bg-gray-950 ${fullscreen ? 'fixed inset-0 z-50' : ''}`}>
+      {/* ========== BARRA SUPERIOR ========== */}
+      <div className="flex items-center justify-between px-4 py-3 bg-gray-900 border-b border-gray-800 shrink-0">
         <div className="flex items-center gap-3">
-          <button onClick={() => router.push('/dispositivos')} className="text-gray-400 hover:text-white">
+          <button onClick={() => { endSession(); router.push('/panel'); }} className="text-gray-400 hover:text-white">
             <svg className="w-5 h-5" fill="none" viewBox="0 0 24 24" stroke="currentColor">
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M15 19l-7-7 7-7" />
             </svg>
           </button>
+          <div className="w-8 h-8 bg-manobi-600 rounded-lg flex items-center justify-center text-white text-xs font-bold">
+            {device?.sistema_operativo === 'windows' ? 'W' : 'L'}
+          </div>
           <div>
-            <h1 className="text-lg font-bold">
-              {device?.nombre || 'Cargando...'}
-            </h1>
-            <p className="text-xs text-gray-500">
-              {device?.hostname} | {device?.direccion_ip}
-            </p>
+            <h1 className="text-sm font-bold text-white">{device?.nombre || 'Cargando...'}</h1>
+            <p className="text-xs text-gray-500">{device?.hostname} | {device?.direccion_ip} | {device?.usuario_actual}</p>
           </div>
           {connected && (
             <>
-              <span className="badge-online ml-2">Conectado</span>
-              <span className="text-xs text-gray-500 ml-2">{fps} FPS</span>
+              <span className="badge-online text-xs">En vivo</span>
+              <span className="text-xs text-gray-500">{fps} FPS</span>
             </>
           )}
         </div>
 
         <div className="flex items-center gap-2">
           {!connected ? (
-            <button onClick={startSession} className="btn-primary">
+            <button onClick={startSession} className="btn-primary text-sm">
               Iniciar Control Remoto
             </button>
           ) : (
             <>
-              <button onClick={() => setShowChat(!showChat)} className="btn-secondary text-sm">
-                Chat
+              {/* Toggle input */}
+              <button
+                onClick={() => setInputEnabled(!inputEnabled)}
+                className={`text-sm px-3 py-1.5 rounded-lg transition-colors ${inputEnabled ? 'bg-emerald-600/20 text-emerald-400 border border-emerald-600/30' : 'bg-gray-700 text-gray-400'}`}
+                title={inputEnabled ? 'Control activo - clic para solo ver' : 'Solo visor - clic para controlar'}
+              >
+                {inputEnabled ? '🖱️ Control' : '👁️ Visor'}
               </button>
-              <button onClick={() => setFullscreen(!fullscreen)} className="btn-secondary text-sm">
-                {fullscreen ? 'Salir' : 'Pantalla Completa'}
+
+              {/* Chat */}
+              <button
+                onClick={() => setRightPanel(rightPanel === 'chat' ? 'none' : 'chat')}
+                className={`text-sm px-3 py-1.5 rounded-lg transition-colors ${rightPanel === 'chat' ? 'bg-manobi-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+              >
+                💬 Chat
               </button>
+
+              {/* Archivos */}
+              <button
+                onClick={openFilesPanel}
+                className={`text-sm px-3 py-1.5 rounded-lg transition-colors ${rightPanel === 'files' ? 'bg-manobi-600 text-white' : 'bg-gray-700 text-gray-300 hover:bg-gray-600'}`}
+              >
+                📁 Archivos
+              </button>
+
+              {/* Pantalla completa */}
+              <button
+                onClick={() => setFullscreen(!fullscreen)}
+                className="bg-gray-700 text-gray-300 hover:bg-gray-600 text-sm px-3 py-1.5 rounded-lg"
+              >
+                {fullscreen ? '⬜ Salir' : '⬛ Completa'}
+              </button>
+
+              {/* Desconectar */}
               <button onClick={endSession} className="btn-danger text-sm">
                 Desconectar
               </button>
@@ -220,70 +363,125 @@ export default function ControlRemotoPage() {
         </div>
       </div>
 
-      {/* Area de visualización */}
-      <div className="flex flex-1">
-        <div className={`flex-1 bg-black flex items-center justify-center ${fullscreen ? 'h-[calc(100vh-64px)]' : 'h-[calc(100vh-180px)]'}`}>
+      {/* ========== AREA PRINCIPAL ========== */}
+      <div className="flex flex-1 overflow-hidden">
+
+        {/* CANVAS - Pantalla remota */}
+        <div className="flex-1 bg-black flex items-center justify-center relative">
           {connected ? (
             <canvas
               ref={canvasRef}
               width={1280}
               height={720}
-              className="w-full h-full object-contain cursor-crosshair"
+              className={`max-w-full max-h-full object-contain ${inputEnabled ? 'cursor-crosshair' : 'cursor-default'}`}
               tabIndex={0}
               onMouseDown={handleMouseEvent}
               onMouseUp={handleMouseEvent}
               onMouseMove={handleMouseEvent}
-              onClick={handleMouseEvent}
+              onClick={(e) => { canvasRef.current?.focus(); handleMouseEvent(e); }}
               onDoubleClick={handleMouseEvent}
               onContextMenu={(e) => { e.preventDefault(); handleMouseEvent(e); }}
             />
           ) : (
             <div className="text-center">
-              <svg className="w-24 h-24 text-gray-700 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+              <svg className="w-20 h-20 text-gray-700 mx-auto mb-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
                 <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1} d="M9.75 17L9 20l-1 1h8l-1-1-.75-3M3 13h18M5 17h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v10a2 2 0 002 2z" />
               </svg>
-              <p className="text-gray-500 text-lg">Haz clic en &quot;Iniciar Control Remoto&quot; para conectarte</p>
-              <p className="text-gray-600 text-sm mt-2">
-                Se transmitira la pantalla del equipo remoto en tiempo real
-              </p>
+              <p className="text-gray-500">Haz clic en &quot;Iniciar Control Remoto&quot;</p>
             </div>
           )}
         </div>
 
-        {/* Panel de Chat */}
-        {showChat && connected && (
-          <div className="w-80 bg-gray-900 border-l border-gray-800 flex flex-col">
-            <div className="p-4 border-b border-gray-800">
-              <h3 className="font-semibold text-sm">Chat con Usuario</h3>
-            </div>
-            <div className="flex-1 overflow-y-auto p-4 space-y-3">
-              {mensajes.map((msg) => (
-                <div key={msg.id} className={`flex ${msg.remitente === 'agente' ? 'justify-end' : 'justify-start'}`}>
-                  <div className={`max-w-[80%] rounded-lg px-3 py-2 text-sm ${
-                    msg.remitente === 'agente' ? 'bg-manobi-600 text-white' : 'bg-gray-800 text-gray-200'
-                  }`}>
-                    {msg.contenido}
-                    <p className="text-[10px] opacity-60 mt-1">
-                      {new Date(msg.creado_en).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}
-                    </p>
-                  </div>
+        {/* ========== PANEL DERECHO ========== */}
+        {rightPanel !== 'none' && connected && (
+          <div className="w-80 bg-gray-900 border-l border-gray-800 flex flex-col shrink-0">
+
+            {/* ----- CHAT ----- */}
+            {rightPanel === 'chat' && (
+              <>
+                <div className="p-3 border-b border-gray-800 flex items-center justify-between">
+                  <h3 className="font-semibold text-sm">💬 Chat</h3>
+                  <button onClick={() => setRightPanel('none')} className="text-gray-500 hover:text-white text-lg">×</button>
                 </div>
-              ))}
-            </div>
-            <form onSubmit={sendMessage} className="p-4 border-t border-gray-800 flex gap-2">
-              <input
-                type="text"
-                value={nuevoMensaje}
-                onChange={(e) => setNuevoMensaje(e.target.value)}
-                className="input-field flex-1 text-sm py-2"
-                placeholder="Escribe un mensaje..."
-              />
-              <button type="submit" className="btn-primary px-3 py-2">
-                <svg className="w-4 h-4" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 19l9 2-9-18-9 18 9-2zm0 0v-8" />
-                </svg>
-              </button>
-            </form>
+                <div className="flex-1 overflow-y-auto p-3 space-y-2">
+                  {mensajes.length === 0 && (
+                    <p className="text-gray-600 text-xs text-center mt-8">No hay mensajes</p>
+                  )}
+                  {mensajes.map((msg, i) => (
+                    <div key={msg.id || i} className={`flex ${msg.remitente === 'agente' ? 'justify-end' : 'justify-start'}`}>
+                      <div className={`max-w-[85%] rounded-lg px-3 py-2 text-sm ${
+                        msg.remitente === 'agente' ? 'bg-manobi-600 text-white' : 'bg-gray-800 text-gray-200'
+                      }`}>
+                        {msg.contenido}
+                        <p className="text-[10px] opacity-50 mt-1">
+                          {new Date(msg.creado_en).toLocaleTimeString('es-CO', { hour: '2-digit', minute: '2-digit' })}
+                        </p>
+                      </div>
+                    </div>
+                  ))}
+                  <div ref={chatEndRef} />
+                </div>
+                <form onSubmit={sendMessage} className="p-3 border-t border-gray-800 flex gap-2">
+                  <input
+                    type="text"
+                    value={nuevoMensaje}
+                    onChange={(e) => setNuevoMensaje(e.target.value)}
+                    className="input-field flex-1 text-sm py-2"
+                    placeholder="Escribe un mensaje..."
+                  />
+                  <button type="submit" className="btn-primary px-3 py-2 text-sm">Enviar</button>
+                </form>
+              </>
+            )}
+
+            {/* ----- ARCHIVOS ----- */}
+            {rightPanel === 'files' && (
+              <>
+                <div className="p-3 border-b border-gray-800 flex items-center justify-between">
+                  <h3 className="font-semibold text-sm">📁 Archivos</h3>
+                  <button onClick={() => setRightPanel('none')} className="text-gray-500 hover:text-white text-lg">×</button>
+                </div>
+
+                {/* Ruta actual y acciones */}
+                <div className="p-3 border-b border-gray-800 space-y-2">
+                  <div className="flex items-center gap-2">
+                    <button onClick={goUpDir} className="bg-gray-800 hover:bg-gray-700 text-xs px-2 py-1 rounded">⬆️ Subir</button>
+                    <button onClick={() => listFiles(currentPath)} className="bg-gray-800 hover:bg-gray-700 text-xs px-2 py-1 rounded">🔄</button>
+                    <button onClick={uploadFile} disabled={uploading} className="bg-manobi-600 hover:bg-manobi-700 text-xs px-2 py-1 rounded text-white disabled:opacity-50">
+                      {uploading ? '⏳ Subiendo...' : '⬆️ Subir archivo'}
+                    </button>
+                  </div>
+                  <p className="text-xs text-gray-500 truncate" title={currentPath}>{currentPath || 'Cargando...'}</p>
+                </div>
+
+                {/* Lista de archivos */}
+                <div className="flex-1 overflow-y-auto">
+                  {files.length === 0 && (
+                    <p className="text-gray-600 text-xs text-center mt-8">Cargando archivos...</p>
+                  )}
+                  {files.map((file, i) => (
+                    <div
+                      key={i}
+                      className="flex items-center justify-between px-3 py-2 hover:bg-gray-800/50 cursor-pointer border-b border-gray-800/50"
+                      onClick={() => file.isDirectory ? navigateToDir(file.path) : null}
+                    >
+                      <div className="flex items-center gap-2 min-w-0 flex-1">
+                        <span className="text-sm">{file.isDirectory ? '📁' : '📄'}</span>
+                        <span className="text-xs text-gray-300 truncate">{file.name}</span>
+                      </div>
+                      {!file.isDirectory && (
+                        <button
+                          onClick={(e) => { e.stopPropagation(); downloadFile(file.path); }}
+                          className="text-xs text-manobi-400 hover:text-manobi-300 shrink-0 ml-2"
+                        >
+                          ⬇️
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
           </div>
         )}
       </div>
