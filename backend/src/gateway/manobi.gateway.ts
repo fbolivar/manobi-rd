@@ -9,6 +9,7 @@ import {
 } from '@nestjs/websockets';
 import { Server, Socket } from 'socket.io';
 import { JwtService } from '@nestjs/jwt';
+import { OnModuleInit } from '@nestjs/common';
 import { DevicesService } from '../devices/devices.service';
 import { SessionsService } from '../sessions/sessions.service';
 import { ChatService } from '../chat/chat.service';
@@ -24,17 +25,19 @@ interface AgentSocket extends Socket {
   cors: { origin: '*' },
   namespace: '/',
   transports: ['websocket', 'polling'],
-  maxHttpBufferSize: 10e6, // 10MB para frames de pantalla
+  maxHttpBufferSize: 10e6,
 })
-export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
+export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, OnModuleInit {
   @WebSocketServer()
   server: Server;
 
   // Mapeo de dispositivos conectados: deviceId -> socketId
   private agentSockets = new Map<string, string>();
-  // Mapeo de agentes (usuarios) conectados: userId -> socketId
+  // Mapeo de usuarios conectados: userId -> socketId
   private userSockets = new Map<string, string>();
-  // Mapeo de sesiones activas: sessionId -> userId (quién está mirando)
+  // Sesión activa por dispositivo: deviceId -> sessionId (solo UNA por dispositivo)
+  private activeSessionsByDevice = new Map<string, string>();
+  // Quién está mirando: sessionId -> userId
   private sessionViewers = new Map<string, string>();
 
   constructor(
@@ -43,6 +46,12 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
     private readonly sessionsService: SessionsService,
     private readonly chatService: ChatService,
   ) {}
+
+  // Limpiar sesiones huérfanas al iniciar
+  async onModuleInit() {
+    console.log('🧹 Limpiando sesiones huérfanas...');
+    await this.sessionsService.closeAllActive();
+  }
 
   async handleConnection(client: AgentSocket) {
     try {
@@ -61,7 +70,6 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
         this.agentSockets.set(device.id, client.id);
         await this.devicesService.updateState(device.id, 'conectado');
 
-        // Notificar a todos los usuarios del panel
         this.server.emit('dispositivo:conectado', {
           id: device.id,
           nombre: device.nombre,
@@ -77,7 +85,6 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
         client.userRole = payload.rol;
         this.userSockets.set(payload.sub, client.id);
         client.join('panel');
-
         console.log(`👤 Usuario conectado: ${payload.correo}`);
       } else {
         client.disconnect();
@@ -89,18 +96,50 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
 
   async handleDisconnect(client: AgentSocket) {
     if (client.deviceId) {
+      // Agente se desconectó: cerrar su sesión activa si la tiene
+      const activeSession = this.activeSessionsByDevice.get(client.deviceId);
+      if (activeSession) {
+        await this.sessionsService.end(activeSession);
+        this.sessionViewers.delete(activeSession);
+        this.activeSessionsByDevice.delete(client.deviceId);
+        console.log(`🔒 Sesión ${activeSession} cerrada (agente desconectado)`);
+      }
+
       this.agentSockets.delete(client.deviceId);
       await this.devicesService.updateState(client.deviceId, 'desconectado');
       this.server.emit('dispositivo:desconectado', { id: client.deviceId });
       console.log(`📟 Agente desconectado: ${client.deviceId}`);
     }
+
     if (client.userId) {
+      // Usuario del panel se desconectó: cerrar todas sus sesiones activas
+      for (const [sessionId, viewerUserId] of this.sessionViewers.entries()) {
+        if (viewerUserId === client.userId) {
+          await this.sessionsService.end(sessionId);
+          this.sessionViewers.delete(sessionId);
+
+          // Encontrar y limpiar el dispositivo asociado
+          for (const [deviceId, sid] of this.activeSessionsByDevice.entries()) {
+            if (sid === sessionId) {
+              this.activeSessionsByDevice.delete(deviceId);
+              await this.devicesService.updateState(deviceId, 'conectado');
+              // Notificar al agente que se finalizó
+              const agentSocketId = this.agentSockets.get(deviceId);
+              if (agentSocketId) {
+                this.server.to(agentSocketId).emit('control:finalizado', { sessionId });
+              }
+              break;
+            }
+          }
+          console.log(`🔒 Sesión ${sessionId} cerrada (usuario desconectado)`);
+        }
+      }
       this.userSockets.delete(client.userId);
     }
   }
 
   // ==========================================
-  // CONTROL REMOTO - WebRTC Signaling
+  // CONTROL REMOTO
   // ==========================================
 
   @SubscribeMessage('control:solicitar')
@@ -114,27 +153,39 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
       return;
     }
 
-    // Crear sesión
+    // Si ya hay una sesión activa para este dispositivo, cerrarla primero
+    const existingSession = this.activeSessionsByDevice.get(data.deviceId);
+    if (existingSession) {
+      await this.sessionsService.end(existingSession);
+      this.sessionViewers.delete(existingSession);
+      // Notificar al agente para que detenga streaming
+      this.server.to(agentSocketId).emit('control:finalizado', { sessionId: existingSession });
+      console.log(`🔒 Sesión anterior ${existingSession} cerrada`);
+    }
+
+    // Crear nueva sesión
     const session = await this.sessionsService.create(
       client.userId!,
       data.deviceId,
       client.handshake.address,
     );
 
-    // Notificar al agente del endpoint
+    // Registrar la sesión activa
+    this.activeSessionsByDevice.set(data.deviceId, session.id);
+    this.sessionViewers.set(session.id, client.userId!);
+
+    // Notificar al agente
     this.server.to(agentSocketId).emit('control:solicitud', {
       sessionId: session.id,
       userId: client.userId,
     });
 
-    // Registrar quién está mirando esta sesión
-    this.sessionViewers.set(session.id, client.userId!);
-
     client.emit('control:sesion-creada', { sessionId: session.id });
+    console.log(`📺 Sesión iniciada: ${session.id} (${data.deviceId})`);
   }
 
   // ==========================================
-  // SCREEN FRAMES - Reenviar del agente al visor
+  // SCREEN FRAMES
   // ==========================================
 
   @SubscribeMessage('screen:frame')
@@ -142,7 +193,6 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @ConnectedSocket() client: AgentSocket,
     @MessageBody() data: { sessionId: string; frame: string; width: number; height: number; timestamp: number },
   ) {
-    // Encontrar quién está mirando esta sesión
     const viewerUserId = this.sessionViewers.get(data.sessionId);
     if (viewerUserId) {
       const viewerSocketId = this.userSockets.get(viewerUserId);
@@ -152,53 +202,8 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
   }
 
-  @SubscribeMessage('webrtc:offer')
-  handleWebRTCOffer(
-    @ConnectedSocket() client: AgentSocket,
-    @MessageBody() data: { targetId: string; offer: RTCSessionDescriptionInit; sessionId: string },
-  ) {
-    const targetSocketId = this.agentSockets.get(data.targetId) || this.userSockets.get(data.targetId);
-    if (targetSocketId) {
-      this.server.to(targetSocketId).emit('webrtc:offer', {
-        offer: data.offer,
-        sessionId: data.sessionId,
-        from: client.deviceId || client.userId,
-      });
-    }
-  }
-
-  @SubscribeMessage('webrtc:answer')
-  handleWebRTCAnswer(
-    @ConnectedSocket() client: AgentSocket,
-    @MessageBody() data: { targetId: string; answer: RTCSessionDescriptionInit; sessionId: string },
-  ) {
-    const targetSocketId = this.agentSockets.get(data.targetId) || this.userSockets.get(data.targetId);
-    if (targetSocketId) {
-      this.server.to(targetSocketId).emit('webrtc:answer', {
-        answer: data.answer,
-        sessionId: data.sessionId,
-        from: client.deviceId || client.userId,
-      });
-    }
-  }
-
-  @SubscribeMessage('webrtc:ice-candidate')
-  handleICECandidate(
-    @ConnectedSocket() client: AgentSocket,
-    @MessageBody() data: { targetId: string; candidate: RTCIceCandidateInit; sessionId: string },
-  ) {
-    const targetSocketId = this.agentSockets.get(data.targetId) || this.userSockets.get(data.targetId);
-    if (targetSocketId) {
-      this.server.to(targetSocketId).emit('webrtc:ice-candidate', {
-        candidate: data.candidate,
-        sessionId: data.sessionId,
-        from: client.deviceId || client.userId,
-      });
-    }
-  }
-
   // ==========================================
-  // INPUT REMOTO (teclado + mouse)
+  // INPUT REMOTO
   // ==========================================
 
   @SubscribeMessage('input:mouse')
@@ -234,13 +239,11 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     const remitente = client.deviceId ? 'usuario' : 'agente';
     const msg = await this.chatService.create(data.sessionId, remitente, data.contenido);
-
-    // Enviar a todos los participantes de la sesión
     this.server.emit(`chat:${data.sessionId}`, msg);
   }
 
   // ==========================================
-  // CONTROL DE SESIÓN
+  // FINALIZAR SESIÓN
   // ==========================================
 
   @SubscribeMessage('control:finalizar')
@@ -250,6 +253,9 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
   ) {
     await this.sessionsService.end(data.sessionId);
     this.sessionViewers.delete(data.sessionId);
+    this.activeSessionsByDevice.delete(data.deviceId);
+
+    await this.devicesService.updateState(data.deviceId, 'conectado');
 
     const agentSocketId = this.agentSockets.get(data.deviceId);
     if (agentSocketId) {
@@ -257,28 +263,25 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
     }
 
     client.emit('control:finalizado', { sessionId: data.sessionId });
+    console.log(`🔒 Sesión ${data.sessionId} finalizada por usuario`);
   }
 
   // ==========================================
-  // HEARTBEAT del agente
+  // HEARTBEAT
   // ==========================================
 
   @SubscribeMessage('heartbeat')
   async handleHeartbeat(
     @ConnectedSocket() client: AgentSocket,
-    @MessageBody() data: { usuario_actual?: string; cpu_info?: string },
+    @MessageBody() data: { usuario_actual?: string },
   ) {
     if (client.deviceId) {
-      await this.devicesService.updateState(client.deviceId, 'conectado');
+      // Solo marcar como conectado si NO tiene sesión activa
+      const hasSession = this.activeSessionsByDevice.has(client.deviceId);
+      if (!hasSession) {
+        await this.devicesService.updateState(client.deviceId, 'conectado');
+      }
       client.emit('heartbeat:ack', { timestamp: Date.now() });
     }
-  }
-
-  // ==========================================
-  // NOTIFICACIONES
-  // ==========================================
-
-  notifyAll(event: string, data: unknown) {
-    this.server.to('panel').emit(event, data);
   }
 }

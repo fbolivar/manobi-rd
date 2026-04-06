@@ -72,14 +72,18 @@ export class SessionsService {
   }
 
   async end(id: string): Promise<Sesion> {
-    const session = await this.findById(id);
+    const session = await this.repo.findOne({ where: { id } });
+    if (!session || session.estado === 'finalizada') return session;
+
     session.estado = 'finalizada';
     session.fin = new Date();
     session.duracion_segundos = Math.floor(
       (session.fin.getTime() - session.inicio.getTime()) / 1000,
     );
 
-    await this.devicesService.updateState(session.dispositivo_id, 'conectado');
+    try {
+      await this.devicesService.updateState(session.dispositivo_id, 'conectado');
+    } catch {}
 
     await this.auditService.log({
       usuario_id: session.usuario_id,
@@ -90,6 +94,32 @@ export class SessionsService {
     });
 
     return this.repo.save(session);
+  }
+
+  // Cerrar todas las sesiones activas (al reiniciar el servidor)
+  async closeAllActive(): Promise<number> {
+    const activeSessions = await this.repo.find({
+      where: [{ estado: 'activa' }, { estado: 'pendiente' }],
+    });
+
+    for (const session of activeSessions) {
+      session.estado = 'interrumpida';
+      session.fin = new Date();
+      session.duracion_segundos = Math.floor(
+        (session.fin.getTime() - session.inicio.getTime()) / 1000,
+      );
+      await this.repo.save(session);
+
+      try {
+        await this.devicesService.updateState(session.dispositivo_id, 'desconectado');
+      } catch {}
+    }
+
+    if (activeSessions.length > 0) {
+      console.log(`🧹 ${activeSessions.length} sesiones huérfanas cerradas`);
+    }
+
+    return activeSessions.length;
   }
 
   async addNotes(id: string, notas: string): Promise<Sesion> {
