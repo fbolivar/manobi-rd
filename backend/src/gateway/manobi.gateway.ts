@@ -238,9 +238,14 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
     @ConnectedSocket() client: AgentSocket,
     @MessageBody() data: { deviceId: string; x: number; y: number; type: string; button?: number },
   ) {
+    console.log(`🖱️ Input mouse recibido: ${data.type} (${data.x?.toFixed(2)}, ${data.y?.toFixed(2)}) -> device: ${data.deviceId}`);
     const agentSocketId = this.agentSockets.get(data.deviceId);
     if (agentSocketId) {
       this.server.to(agentSocketId).emit('input:mouse', data);
+      console.log(`🖱️ Reenviado a socket: ${agentSocketId}`);
+    } else {
+      console.log(`🖱️ ERROR: No se encontró socket para device ${data.deviceId}`);
+      console.log(`🖱️ Devices conectados: ${JSON.stringify([...this.agentSockets.keys()])}`);
     }
   }
 

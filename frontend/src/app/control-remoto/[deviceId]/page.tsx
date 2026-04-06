@@ -167,19 +167,22 @@ export default function ControlRemotoPage() {
   // MOUSE - Solo enviar clics, NO movimiento
   // ==========================================
   const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    console.log('CLICK detectado', { connected, inputEnabled, hasCanvas: !!canvasRef.current });
     if (!connected || !inputEnabled || !canvasRef.current) return;
-    e.preventDefault();
+
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
 
-    socketRef.current.emit('input:mouse', {
+    const payload = {
       deviceId,
       x: Math.max(0, Math.min(1, x)),
       y: Math.max(0, Math.min(1, y)),
       type: 'click',
       button: e.button,
-    });
+    };
+    console.log('Enviando input:mouse', payload);
+    socketRef.current.emit('input:mouse', payload);
   }, [connected, inputEnabled, deviceId]);
 
   const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
