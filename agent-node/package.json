@@ -1,0 +1,12 @@
+{
+  "name": "manobi-rd-agent",
+  "version": "1.0.0",
+  "description": "Manobi-RD - Agente de Soporte Remoto",
+  "main": "agent.js",
+  "scripts": {
+    "start": "node agent.js"
+  },
+  "dependencies": {
+    "socket.io-client": "^4.7.5"
+  }
+}
