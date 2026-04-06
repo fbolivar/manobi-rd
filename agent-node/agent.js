@@ -286,8 +286,8 @@ while ($true) {
       }
     });
 
-    psProcess.on('exit', () => { psProcess = null; });
-    psProcess.stderr.on('data', () => {});
+    psProcess.on('exit', (code) => { console.log(`⚠️ Proceso input terminó (code: ${code})`); psProcess = null; });
+    psProcess.stderr.on('data', (data) => { console.log(`PS Error: ${data.toString().trim()}`); });
 
     return true;
   } catch (err) {
@@ -297,16 +297,27 @@ while ($true) {
 }
 
 function sendInputCmd(cmd) {
-  if (psProcess && psProcess.stdin.writable) {
-    psProcess.stdin.write(cmd + '\n');
+  if (!psProcess || !psProcess.stdin || !psProcess.stdin.writable) {
+    // Reiniciar el proceso si se cayó
+    console.log('⚠️ Proceso input caido, reiniciando...');
+    initInputSystem();
+    setTimeout(() => {
+      if (psProcess && psProcess.stdin && psProcess.stdin.writable) {
+        psProcess.stdin.write(cmd + '\n');
+      }
+    }, 1000);
+    return;
   }
+  psProcess.stdin.write(cmd + '\n');
 }
 
 function handleMouseInput(data) {
   const absX = Math.round(data.x * screenWidth);
   const absY = Math.round(data.y * screenHeight);
 
-  if (psProcess) {
+  console.log(`🖱️ Clic: ${data.type} en (${absX}, ${absY}) - screen: ${screenWidth}x${screenHeight}`);
+
+  if (process.platform === 'win32') {
     switch (data.type) {
       case 'click': sendInputCmd(`C ${absX} ${absY}`); break;
       case 'dblclick': sendInputCmd(`D ${absX} ${absY}`); break;
@@ -316,9 +327,10 @@ function handleMouseInput(data) {
 }
 
 function handleKeyboardInput(data) {
-  if (data.type !== 'keydown' || !psProcess) return;
+  if (data.type !== 'keydown') return;
   const vk = mapKeyToVK(data.key);
   if (vk === null) return;
+  console.log(`⌨️ Tecla: ${data.key} (VK: ${vk})`);
 
   const mods = data.modifiers || [];
   if (mods.includes('ctrl')) sendInputCmd('KD 17');
