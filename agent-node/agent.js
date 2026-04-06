@@ -114,6 +114,9 @@ function showAuthorizationPopup() {
 // CHAT - Ventana en equipo del cliente
 // ============================================
 let chatProcess = null;
+const chatInbox = path.join(os.tmpdir(), 'manobi-chat-inbox.txt');
+const chatOutbox = path.join(os.tmpdir(), 'manobi-chat-outbox.txt');
+let chatPollInterval = null;
 
 function startChatWindow(socket, sessionId) {
   if (process.platform !== 'win32') return;
@@ -125,45 +128,53 @@ function startChatWindow(socket, sessionId) {
     return;
   }
 
+  // Limpiar archivos de comunicación
+  try { fs.writeFileSync(chatInbox, ''); } catch {}
+  try { fs.writeFileSync(chatOutbox, ''); } catch {}
+
   chatProcess = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', chatScript], {
-    stdio: ['pipe', 'pipe', 'pipe'],
+    stdio: 'ignore',
+    detached: true,
   });
-
-  // Leer mensajes del usuario (stdout del chat)
-  chatProcess.stdout.on('data', (data) => {
-    const lines = data.toString().trim().split('\n');
-    for (const line of lines) {
-      if (line.startsWith('CHAT:')) {
-        const msg = line.substring(5);
-        console.log(`💬 Usuario dice: ${msg}`);
-        // Enviar al backend como mensaje del usuario
-        socket.emit('chat:mensaje', { sessionId, contenido: msg });
-      }
-      if (line === 'CHAT_CLOSED') {
-        console.log('💬 Usuario cerró el chat');
-      }
-    }
-  });
-
+  chatProcess.unref();
   chatProcess.on('exit', () => { chatProcess = null; });
-  chatProcess.stderr.on('data', () => {});
+
+  // Leer mensajes del usuario via archivo outbox
+  chatPollInterval = setInterval(() => {
+    try {
+      const content = fs.readFileSync(chatOutbox, 'utf8').trim();
+      if (!content) return;
+      fs.writeFileSync(chatOutbox, '');
+
+      const lines = content.split('\n');
+      for (const line of lines) {
+        const msg = line.trim();
+        if (!msg) continue;
+        if (msg === 'CHAT_CLOSED') {
+          console.log('💬 Usuario cerró el chat');
+          continue;
+        }
+        console.log(`💬 Usuario dice: ${msg}`);
+        socket.emit('chat:mensaje', { sessionId, contenido: `[Usuario] ${msg}` });
+      }
+    } catch {}
+  }, 500);
 
   console.log('💬 Ventana de chat abierta');
 }
 
 function sendChatMessage(mensaje) {
-  if (chatProcess && chatProcess.stdin && chatProcess.stdin.writable) {
-    chatProcess.stdin.write(`MSG:${mensaje}\n`);
-  }
+  try {
+    fs.appendFileSync(chatInbox, mensaje + '\n');
+  } catch {}
 }
 
 function closeChatWindow() {
-  if (chatProcess && chatProcess.stdin && chatProcess.stdin.writable) {
-    chatProcess.stdin.write('CLOSE\n');
-    setTimeout(() => {
-      if (chatProcess) { try { chatProcess.kill(); } catch {} chatProcess = null; }
-    }, 4000);
-  }
+  if (chatPollInterval) { clearInterval(chatPollInterval); chatPollInterval = null; }
+  try { fs.writeFileSync(chatInbox, 'CLOSE\n'); } catch {}
+  setTimeout(() => {
+    if (chatProcess) { try { chatProcess.kill(); } catch {} chatProcess = null; }
+  }, 4000);
 }
 
 // ============================================

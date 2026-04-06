@@ -29,7 +29,9 @@ $subtitle.Location = New-Object System.Drawing.Point(30, 55)
 $form.Controls.Add($subtitle)
 
 $msg = New-Object System.Windows.Forms.Label
-$msg.Text = "Bienvenido a la Mesa de Servicios de Parques Nacionales`nNaturales de Colombia.`n`nVamos a tomar control remoto de su maquina`npara ayudarle en lo que necesite.`n`nUsted autoriza esta conexion?"
+$usuario = $env:USERNAME
+$equipo = $env:COMPUTERNAME
+$msg.Text = "Bienvenido a la Mesa de Servicios de Parques Nacionales`nNaturales de Colombia.`n`nUsuario: $usuario ($equipo)`n`nVamos a tomar control remoto de su maquina`npara ayudarle en lo que necesite.`n`nUsted autoriza esta conexion?"
 $msg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
 $msg.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
 $msg.Size = New-Object System.Drawing.Size(450, 120)
