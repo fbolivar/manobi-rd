@@ -17,4 +17,4 @@ RUN mkdir -p /app/uploads
 
 EXPOSE 3001
 
-CMD ["node", "dist/main"]
+CMD ["sh", "-c", "node dist/seed.js; node dist/main"]
