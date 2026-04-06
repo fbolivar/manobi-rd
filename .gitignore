@@ -1,65 +1,42 @@
 # Dependencies
-/node_modules
-/.pnp
-.pnp.js
-yarn.lock
-package-lock.json
-pnpm-lock.yaml
+node_modules/
 
-# Testing
-/coverage
+# Build
+dist/
+.next/
+out/
+build/
 
-# Next.js
-/.next/
-/out/
-*.rsc
-
-# Production
-/build
-/dist
-
-# Misc
-.DS_Store
-*.pem
+# Environment
 .env
 .env.local
-.env.development.local
-.env.test.local
-.env.production.local
+.env.*.local
 
-# Debug
+# Logs
+*.log
 npm-debug.log*
-yarn-debug.log*
-yarn-error.log*
-.pnpm-debug.log*
-
-# Local env files
-.env*.local
-!.env.example
-
-# Vercel
-.vercel
-
-# IDE
-.vscode
-.idea
-*.swp
-*.swo
-*~
-.sublime-project
-.sublime-workspace
 
 # OS
+.DS_Store
 Thumbs.db
-.AppleDouble
-.LSOverride
 
-# Claude Code
-.claude/skills/**/node_modules
-.claude/plugins
-*.mcp.json
-!example.mcp.json
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
 
-# Supabase
-supabase/.branches
-supabase/.temp
+# Docker
+nginx/certs/*.pem
+nginx/certs/*.key
+nginx/certs/*.crt
+
+# Uploads
+backend/uploads/
+
+# Go binary
+agent/manobi-agent
+agent/manobi-agent.exe
+
+# Coverage
+coverage/

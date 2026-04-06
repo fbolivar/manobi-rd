@@ -1,170 +1,101 @@
-# SaaS Factory V4
+# Manobi-RD - Plataforma de Soporte Remoto
 
-Template production-ready para crear aplicaciones SaaS con desarrollo asistido por IA. Filosofia Agent-First: el usuario dice que quiere, el agente construye todo.
+**Mesa de ayuda con control remoto** para equipos Windows y Linux, dentro y fuera de dominio.
 
-## Que incluye
+Desarrollado por **BC Fabric SAS** - Colombia.
 
-- Next.js 16 (App Router) + TypeScript
-- Supabase (Database + Auth + RLS)
-- Tailwind CSS + shadcn/ui
-- 19 Skills de Claude Code (V4 Skills 2.0)
-- Playwright CLI para QA automatizado
-- AI Templates (Vercel AI SDK v5 + OpenRouter)
-- 5 Design Systems listos para usar
-- Arquitectura Feature-First optimizada para IA
-- Auto-Blindaje: el sistema aprende de cada error
+## Características
 
-## Quick Start
+- Control remoto de equipos (pantalla + teclado + mouse)
+- Panel web para agentes de soporte
+- Multiusuario (mínimo 10 agentes concurrentes)
+- Lista de equipos conectados en tiempo real
+- Transferencia de archivos
+- Chat con usuario final
+- Historial de sesiones
+- Auditoría completa
+- Etiquetas y búsqueda rápida
+- Modo desatendido
 
-### 1. Instalar
+## Arquitectura
 
-```bash
-npm install
-```
+| Componente | Tecnología |
+|------------|------------|
+| Backend | NestJS + TypeScript |
+| Frontend | Next.js 14 + React + Tailwind CSS |
+| Base de Datos | PostgreSQL 16 |
+| Cache/Sesiones | Redis 7 |
+| Comunicación | WebSocket + WebRTC |
+| TURN Server | Coturn |
+| Agente | Go |
+| Proxy | Nginx |
+| Contenedores | Docker + Docker Compose |
 
-### 2. Variables de Entorno
+## Instalación Rápida
 
-```bash
-cp .env.example .env.local
-# Editar con credenciales de Supabase
-```
-
-### 3. MCPs (Opcional)
-
-```bash
-cp .claude/example.mcp.json .mcp.json
-# Editar con project ref de Supabase
-```
-
-### 4. Desarrollar
+En tu servidor Debian/Ubuntu, ejecuta:
 
 ```bash
-npm run dev
-# Auto-detecta puerto disponible (3000-3006)
+git clone https://github.com/fbolivar/manobi-rd.git
+cd manobi-rd
+chmod +x install.sh
+./install.sh
 ```
 
-## Tech Stack
+Eso es todo. El script instala Docker, PostgreSQL, Redis, y levanta toda la plataforma.
 
-```yaml
-Runtime: Node.js + TypeScript
-Framework: Next.js 16 (App Router)
-Database: PostgreSQL/Supabase
-Styling: Tailwind CSS 3.4
-Components: shadcn/ui
-State: Zustand
-Validation: Zod
-AI Engine: Vercel AI SDK v5 + OpenRouter
-Testing: Playwright CLI + MCP
-Deploy: Vercel
+## Acceso
+
+- **Panel web:** `http://IP_SERVIDOR`
+- **Usuario:** `admin@manobi.local`
+- **Contraseña:** `Admin123!`
+
+## Instalar Agente en Equipos
+
+### Windows (PowerShell como Admin)
+```powershell
+.\install-agent-windows.ps1 -ServerURL "ws://IP_SERVIDOR:3001"
 ```
 
-## Arquitectura Feature-First
-
-```
-src/
-├── app/                      # Next.js App Router
-│   ├── (auth)/              # Rutas auth
-│   ├── (main)/              # Rutas principales
-│   └── layout.tsx
-│
-├── features/                 # Organizadas por funcionalidad
-│   └── [feature]/
-│       ├── components/
-│       ├── hooks/
-│       ├── services/
-│       ├── types/
-│       └── store/
-│
-└── shared/                   # Codigo reutilizable
-    ├── components/
-    ├── hooks/
-    ├── lib/
-    └── types/
-```
-
-## Skills (19 total)
-
-### Para el usuario
-
-| Skill | Que hace |
-|-------|----------|
-| `/new-app` | Entrevista de negocio → BUSINESS_LOGIC.md |
-| `/landing` | Landing page de alta conversion |
-| `/add-login` | Auth completo (Email + Google OAuth + profiles + RLS) |
-| `/bucle-agentico` | Implementar features complejas por fases |
-| `/sprint` | Tareas rapidas sin planificacion |
-| `/prp` | Planificar features complejas antes de implementar |
-| `/ai [template]` | Agregar IA: chat, RAG, vision, tools |
-| `/qa` | QA automatizado con Playwright CLI |
-| `/primer` | Inicializar contexto del proyecto |
-| `/update-sf` | Actualizar a ultima version |
-| `/eject-sf` | Remover SaaS Factory (destructivo) |
-| `/skill-creator` | Crear nuevos skills |
-
-### Automaticos (Claude los activa segun la tarea)
-
-backend, frontend, supabase-admin, codebase-analyst, vercel-deployer, documentacion, calidad
-
-## AI Templates
-
-Bloques LEGO para construir features de IA con Vercel AI SDK v5 + OpenRouter:
-
-| Template | Que hace |
-|----------|----------|
-| setup-base | Configuracion inicial |
-| chat | Chat streaming con useChat |
-| web-search | Busqueda con :online |
-| historial | Persistencia en Supabase |
-| vision | Analisis de imagenes |
-| tools | Funciones/herramientas |
-| rag | pgvector + embeddings |
-| single-call | generateText() puntual |
-| structured-outputs | generateObject() con Zod |
-| generative-ui | LLM decide que componente renderizar |
-
-## Design Systems
-
-5 sistemas visuales listos en `.claude/design-systems/`:
-
-- **Liquid Glass** - iOS-like, transparencias
-- **Gradient Mesh** - Degradados fluidos
-- **Neumorphism** - Soft UI, sombras suaves
-- **Bento Grid** - Grids asimetricos
-- **Neobrutalism** - Bold, bordes duros
-
-## Comandos
-
+### Linux (como root)
 ```bash
-npm run dev          # Desarrollo (auto-port 3000-3006)
-npm run build        # Build produccion
-npm run typecheck    # TypeScript check
-npm run lint         # ESLint
+bash install-agent-linux.sh ws://IP_SERVIDOR:3001
 ```
 
-## Deploy
-
-```bash
-# Vercel (recomendado)
-npm install -g vercel
-vercel
-```
-
-Variables en Vercel Dashboard:
-- `NEXT_PUBLIC_SUPABASE_URL`
-- `NEXT_PUBLIC_SUPABASE_ANON_KEY`
-
-## Estructura .claude/
+## Estructura del Proyecto
 
 ```
-.claude/
-├── skills/              # 19 Skills (V4 Skills 2.0)
-├── PRPs/                # Product Requirements Proposals
-│   │   └── references/  # AI Templates (11 bloques)
-├── design-systems/      # 5 sistemas de diseno
-├── hooks/               # Scripts en eventos
-└── example.mcp.json     # Config de MCPs
+manobi-rd/
+├── backend/          # API NestJS
+├── frontend/         # Panel web Next.js
+├── agent/            # Agente Go para endpoints
+├── nginx/            # Configuración reverse proxy
+├── coturn/           # Servidor TURN para WebRTC
+├── scripts/          # Scripts de instalación
+├── docker-compose.yml
+└── install.sh        # Instalador automático
 ```
 
----
+## API Endpoints
 
-**SaaS Factory V4** | Agent-First. Todo es un Skill.
+| Método | Ruta | Descripción |
+|--------|------|-------------|
+| POST | /auth/login | Iniciar sesión |
+| GET | /dispositivos | Listar dispositivos |
+| GET | /dispositivos/conectados | Dispositivos en línea |
+| GET | /dispositivos/buscar?q= | Buscar dispositivos |
+| POST | /sesiones/:deviceId/iniciar | Iniciar control remoto |
+| PUT | /sesiones/:id/finalizar | Finalizar sesión |
+| GET | /auditoria | Consultar logs |
+
+## Seguridad
+
+- JWT + RBAC (admin, supervisor, agente)
+- Comunicación cifrada TLS
+- Tokens únicos por dispositivo
+- Auditoría completa de acciones
+- Contraseñas hasheadas con bcrypt
+
+## Licencia
+
+Propiedad de BC Fabric SAS. Todos los derechos reservados.
