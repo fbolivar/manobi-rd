@@ -113,70 +113,11 @@ function showAuthorizationPopup() {
 // ============================================
 // CHAT - Ventana en equipo del cliente
 // ============================================
-let chatServer = null;
-let chatMessages = []; // Cola de mensajes del soporte para enviar al browser
-let chatSocket = null;
-let chatSessionId = null;
-
-function startChatWindow(socket, sessionId) {
-  chatSocket = socket;
-  chatSessionId = sessionId;
-  chatMessages = [];
-
-  const http = require('http');
-  const chatHtml = path.join(__dirname, 'chat.html');
-
-  if (chatServer) { try { chatServer.close(); } catch {} }
-
-  chatServer = http.createServer((req, res) => {
-    if (req.url === '/messages') {
-      // Enviar mensajes pendientes al browser
-      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
-      res.end(JSON.stringify({ messages: chatMessages.splice(0) }));
-    } else if (req.url === '/send' && req.method === 'POST') {
-      // Recibir mensaje del usuario
-      let body = '';
-      req.on('data', chunk => body += chunk);
-      req.on('end', () => {
-        const msg = body.trim();
-        if (msg && chatSocket && chatSessionId) {
-          console.log(`💬 Usuario dice: ${msg}`);
-          chatSocket.emit('chat:mensaje', { sessionId: chatSessionId, contenido: `[Usuario] ${msg}` });
-        }
-        res.writeHead(200, { 'Access-Control-Allow-Origin': '*' });
-        res.end('ok');
-      });
-    } else if (req.url === '/') {
-      // Servir el HTML del chat
-      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
-      res.end(fs.readFileSync(chatHtml, 'utf8'));
-    } else {
-      res.writeHead(404);
-      res.end();
-    }
-  });
-
-  chatServer.listen(19876, '127.0.0.1', () => {
-    console.log('💬 Chat server en http://localhost:19876');
-    // Abrir en el navegador del usuario
-    exec('start http://localhost:19876', () => {});
-  });
-
-  chatServer.on('error', (err) => {
-    console.log('⚠️ Chat server error:', err.message);
-  });
-}
-
-function sendChatMessage(mensaje) {
-  chatMessages.push(mensaje);
-}
-
-function closeChatWindow() {
-  chatMessages.push('__CLOSE__');
-  setTimeout(() => {
-    if (chatServer) { try { chatServer.close(); } catch {} chatServer = null; }
-  }, 3000);
-}
+// Chat deshabilitado del lado del cliente
+// El chat funciona como notas de sesión desde el panel web
+function startChatWindow() {}
+function sendChatMessage() {}
+function closeChatWindow() {}
 
 // ============================================
 // CAPTURA DE PANTALLA
