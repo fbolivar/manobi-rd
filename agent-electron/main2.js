@@ -31,6 +31,7 @@ app.commandLine.appendSwitch('disable-software-rasterizer');
 app.whenReady().then(() => {
   createWindow();
   createTray();
+  initInput();
   registerDevice();
 });
 
@@ -322,94 +323,116 @@ function stopStreaming() {
 }
 
 // ============================================
-// CONTROL DE INPUT - nut.js
+// CONTROL DE INPUT - PowerShell persistente (probado, funcional)
 // ============================================
-let nutMouse = null;
-let nutKeyboard = null;
+let psInput = null;
 
-async function initNut() {
-  try {
-    const nut = require('@nut-tree-fork/nut-js');
-    nutMouse = nut.mouse;
-    nutKeyboard = nut.keyboard;
-    nut.mouse.config.mouseSpeed = 0; // Movimiento instantáneo
-    console.log('✅ Control de input inicializado (nut.js)');
-  } catch (err) {
-    console.log('⚠️ nut.js no disponible:', err.message);
-  }
+function initInput() {
+  const { spawn: sp } = require('child_process');
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class MI {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, int e);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte s, uint f, int e);
+    public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2,0,0,0,0); mouse_event(4,0,0,0,0); }
+    public static void RClick(int x, int y) { SetCursorPos(x, y); mouse_event(8,0,0,0,0); mouse_event(16,0,0,0,0); }
+    public static void DblClick(int x, int y) { SetCursorPos(x, y); mouse_event(2,0,0,0,0); mouse_event(4,0,0,0,0); System.Threading.Thread.Sleep(50); mouse_event(2,0,0,0,0); mouse_event(4,0,0,0,0); }
+    public static void Key(byte vk) { keybd_event(vk,0,0,0); keybd_event(vk,0,2,0); }
+    public static void KD(byte vk) { keybd_event(vk,0,0,0); }
+    public static void KU(byte vk) { keybd_event(vk,0,2,0); }
 }
-initNut();
+"@
+Write-Host "READY"
+while ($true) {
+    $line = [Console]::ReadLine()
+    if ($line -eq $null -or $line -eq "EXIT") { break }
+    try {
+        $parts = $line.Split(' ', 3)
+        switch ($parts[0]) {
+            "C" { [MI]::Click([int]$parts[1], [int]$parts[2]) }
+            "R" { [MI]::RClick([int]$parts[1], [int]$parts[2]) }
+            "D" { [MI]::DblClick([int]$parts[1], [int]$parts[2]) }
+            "K" { [MI]::Key([byte]$parts[1]) }
+            "KD" { [MI]::KD([byte]$parts[1]) }
+            "KU" { [MI]::KU([byte]$parts[1]) }
+            "T" { [System.Windows.Forms.SendKeys]::SendWait($parts[1]) }
+            "SP" { [System.Windows.Forms.SendKeys]::SendWait(' ') }
+        }
+    } catch {}
+}
+`;
+  const scriptPath = path.join(os.tmpdir(), 'manobi-input.ps1');
+  fs.writeFileSync(scriptPath, script);
+  psInput = sp('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], { stdio: ['pipe', 'pipe', 'pipe'] });
+  psInput.stdout.on('data', (d) => { if (d.toString().trim() === 'READY') console.log('✅ Control de input inicializado'); });
+  psInput.on('exit', () => { psInput = null; });
+  psInput.stderr.on('data', () => {});
+}
 
-async function handleMouse(data) {
+function sendCmd(cmd) {
+  if (psInput && psInput.stdin.writable) psInput.stdin.write(cmd + '\n');
+}
+
+function handleMouse(data) {
   const absX = Math.round(data.x * screenSize.width);
   const absY = Math.round(data.y * screenSize.height);
-
-  if (nutMouse) {
-    try {
-      const { Point, Button } = require('@nut-tree-fork/nut-js');
-      await nutMouse.setPosition(new Point(absX, absY));
-
-      switch (data.type) {
-        case 'click':
-          await nutMouse.click(data.button === 2 ? Button.RIGHT : Button.LEFT);
-          break;
-        case 'dblclick':
-          await nutMouse.doubleClick(Button.LEFT);
-          break;
-        case 'contextmenu':
-          await nutMouse.click(Button.RIGHT);
-          break;
-      }
-    } catch {}
+  console.log(`🖱️ ${data.type} (${absX}, ${absY})`);
+  switch (data.type) {
+    case 'click': sendCmd(`C ${absX} ${absY}`); break;
+    case 'dblclick': sendCmd(`D ${absX} ${absY}`); break;
+    case 'contextmenu': sendCmd(`R ${absX} ${absY}`); break;
   }
 }
 
-async function handleKeyboard(data) {
-  if (data.type !== 'keydown' || !nutKeyboard) return;
+function handleKeyboard(data) {
+  if (data.type !== 'keydown') return;
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(data.key)) return;
 
-  try {
-    const { Key } = require('@nut-tree-fork/nut-js');
+  const specialVK = {
+    'Enter': 13, 'Backspace': 8, 'Tab': 9, 'Escape': 27, 'Delete': 46,
+    'Home': 36, 'End': 35, 'PageUp': 33, 'PageDown': 34,
+    'ArrowUp': 38, 'ArrowDown': 40, 'ArrowLeft': 37, 'ArrowRight': 39,
+    'F1': 112, 'F2': 113, 'F3': 114, 'F4': 115, 'F5': 116,
+    'F6': 117, 'F7': 118, 'F8': 119, 'F9': 120, 'F10': 121, 'F11': 122, 'F12': 123,
+    'CapsLock': 20, 'Insert': 45,
+  };
 
-    const keyMap = {
-      'Enter': Key.Enter, 'Backspace': Key.Backspace, 'Tab': Key.Tab,
-      'Escape': Key.Escape, 'Delete': Key.Delete, ' ': Key.Space,
-      'ArrowUp': Key.Up, 'ArrowDown': Key.Down, 'ArrowLeft': Key.Left, 'ArrowRight': Key.Right,
-      'Home': Key.Home, 'End': Key.End, 'PageUp': Key.PageUp, 'PageDown': Key.PageDown,
-      'F1': Key.F1, 'F2': Key.F2, 'F3': Key.F3, 'F4': Key.F4, 'F5': Key.F5,
-      'F6': Key.F6, 'F7': Key.F7, 'F8': Key.F8, 'F9': Key.F9, 'F10': Key.F10,
-      'F11': Key.F11, 'F12': Key.F12,
-    };
+  const mods = data.modifiers || [];
 
-    // Teclas modificadoras
-    if (['Control', 'Shift', 'Alt', 'Meta'].includes(data.key)) return;
+  if (specialVK[data.key] !== undefined) {
+    if (mods.includes('ctrl')) sendCmd('KD 17');
+    if (mods.includes('shift')) sendCmd('KD 16');
+    if (mods.includes('alt')) sendCmd('KD 18');
+    sendCmd(`K ${specialVK[data.key]}`);
+    if (mods.includes('alt')) sendCmd('KU 18');
+    if (mods.includes('shift')) sendCmd('KU 16');
+    if (mods.includes('ctrl')) sendCmd('KU 17');
+    return;
+  }
 
-    const mods = data.modifiers || [];
-    const modKeys = [];
-    if (mods.includes('ctrl')) modKeys.push(Key.LeftControl);
-    if (mods.includes('shift')) modKeys.push(Key.LeftShift);
-    if (mods.includes('alt')) modKeys.push(Key.LeftAlt);
-
-    if (keyMap[data.key]) {
-      if (modKeys.length > 0) {
-        await nutKeyboard.pressKey(...modKeys);
-        await nutKeyboard.pressKey(keyMap[data.key]);
-        await nutKeyboard.releaseKey(keyMap[data.key]);
-        await nutKeyboard.releaseKey(...modKeys);
-      } else {
-        await nutKeyboard.pressKey(keyMap[data.key]);
-        await nutKeyboard.releaseKey(keyMap[data.key]);
-      }
-    } else if (data.key.length === 1) {
-      // Caracteres normales
-      if (modKeys.length > 0) {
-        await nutKeyboard.pressKey(...modKeys);
-        await nutKeyboard.type(data.key);
-        await nutKeyboard.releaseKey(...modKeys);
-      } else {
-        await nutKeyboard.type(data.key);
-      }
+  if (mods.includes('ctrl') || mods.includes('alt')) {
+    const c = data.key.toUpperCase().charCodeAt(0);
+    if (c >= 48 && c <= 90) {
+      if (mods.includes('ctrl')) sendCmd('KD 17');
+      if (mods.includes('alt')) sendCmd('KD 18');
+      sendCmd(`K ${c}`);
+      if (mods.includes('alt')) sendCmd('KU 18');
+      if (mods.includes('ctrl')) sendCmd('KU 17');
     }
-  } catch {}
+    return;
+  }
+
+  if (data.key === ' ') { sendCmd('SP'); return; }
+
+  if (data.key.length === 1) {
+    let k = data.key;
+    if (['+', '^', '%', '~', '{', '}', '[', ']', '(', ')'].includes(k)) k = `{${k}}`;
+    sendCmd(`T ${k}`);
+  }
 }
 
 // ============================================
