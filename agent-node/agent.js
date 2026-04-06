@@ -111,26 +111,59 @@ function showAuthorizationPopup() {
 }
 
 // ============================================
-// CHAT - Mostrar mensaje en equipo remoto
+// CHAT - Ventana en equipo del cliente
 // ============================================
-function showChatNotification(mensaje) {
+let chatProcess = null;
+
+function startChatWindow(socket, sessionId) {
   if (process.platform !== 'win32') return;
+  if (chatProcess) { try { chatProcess.kill(); } catch {} }
 
-  const psCmd = `
-Add-Type -AssemblyName System.Windows.Forms
-$n = New-Object System.Windows.Forms.NotifyIcon
-$n.Icon = [System.Drawing.SystemIcons]::Information
-$n.Visible = $true
-$n.BalloonTipTitle = 'Mesa de Servicios - Manobi-RD'
-$n.BalloonTipText = '${mensaje.replace(/'/g, "''").replace(/\n/g, ' ')}'
-$n.BalloonTipIcon = 'Info'
-$n.ShowBalloonTip(10000)
-Start-Sleep -Seconds 10
-$n.Dispose()
-`;
+  const chatScript = path.join(__dirname, 'chat-window.ps1');
+  if (!fs.existsSync(chatScript)) {
+    console.log('⚠️ chat-window.ps1 no encontrado');
+    return;
+  }
 
-  exec(`powershell -NoProfile -WindowStyle Hidden -Command "${psCmd.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
-    { timeout: 15000 }, () => {});
+  chatProcess = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', chatScript], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  // Leer mensajes del usuario (stdout del chat)
+  chatProcess.stdout.on('data', (data) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      if (line.startsWith('CHAT:')) {
+        const msg = line.substring(5);
+        console.log(`💬 Usuario dice: ${msg}`);
+        // Enviar al backend como mensaje del usuario
+        socket.emit('chat:mensaje', { sessionId, contenido: msg });
+      }
+      if (line === 'CHAT_CLOSED') {
+        console.log('💬 Usuario cerró el chat');
+      }
+    }
+  });
+
+  chatProcess.on('exit', () => { chatProcess = null; });
+  chatProcess.stderr.on('data', () => {});
+
+  console.log('💬 Ventana de chat abierta');
+}
+
+function sendChatMessage(mensaje) {
+  if (chatProcess && chatProcess.stdin && chatProcess.stdin.writable) {
+    chatProcess.stdin.write(`MSG:${mensaje}\n`);
+  }
+}
+
+function closeChatWindow() {
+  if (chatProcess && chatProcess.stdin && chatProcess.stdin.writable) {
+    chatProcess.stdin.write('CLOSE\n');
+    setTimeout(() => {
+      if (chatProcess) { try { chatProcess.kill(); } catch {} chatProcess = null; }
+    }, 4000);
+  }
 }
 
 // ============================================
@@ -144,15 +177,18 @@ async function captureScreen() {
 
   if (screenshot) {
     try {
-      const imgBuffer = await screenshot({ format: 'png' });
+      const imgBuffer = await screenshot({ format: 'jpg' });
       captureFailCount = 0;
       if (sharp) {
-        const metadata = await sharp(imgBuffer).metadata();
-        screenWidth = metadata.width || 1920;
-        screenHeight = metadata.height || 1080;
+        if (screenWidth === 1920) {
+          // Leer dimensiones solo una vez
+          const metadata = await sharp(imgBuffer).metadata();
+          screenWidth = metadata.width || 1920;
+          screenHeight = metadata.height || 1080;
+        }
         const compressed = await sharp(imgBuffer)
-          .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 40 })
+          .resize(960, 540, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 30, mozjpeg: true })
           .toBuffer();
         return compressed.toString('base64');
       }
@@ -185,7 +221,7 @@ function captureWithPowerShell() {
         const imgBuffer = fs.readFileSync(tmpFile);
         try { fs.unlinkSync(tmpFile); } catch {}
         if (sharp) {
-          sharp(imgBuffer).resize(1280, 720, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 40 }).toBuffer()
+          sharp(imgBuffer).resize(960, 540, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 30, mozjpeg: true }).toBuffer()
             .then(buf => resolve(buf.toString('base64'))).catch(() => resolve(imgBuffer.toString('base64')));
         } else { resolve(imgBuffer.toString('base64')); }
       } catch (e) { reject(e); }
@@ -199,30 +235,24 @@ async function createPlaceholderFrame() {
   return Buffer.from(svg).toString('base64');
 }
 
-let lastFrameHash = '';
-function simpleHash(str) {
-  let hash = 0;
-  const sample = str.substring(0, 500) + str.substring(str.length - 500);
-  for (let i = 0; i < sample.length; i++) { hash = ((hash << 5) - hash) + sample.charCodeAt(i); hash = hash & hash; }
-  return hash.toString();
-}
+let lastFrameSize = 0;
 
 function startStreaming(socket, sessionId) {
   if (isStreaming) stopStreaming();
   isStreaming = true;
   currentSessionId = sessionId;
-  lastFrameHash = '';
+  lastFrameSize = 0;
   console.log(`📺 Streaming iniciado: ${sessionId}`);
 
   streamingInterval = setInterval(async () => {
     try {
       const frame = await captureScreen();
-      const hash = simpleHash(frame);
-      if (hash === lastFrameHash) return;
-      lastFrameHash = hash;
+      // Solo saltar si el tamaño es exactamente igual (pantalla estática)
+      if (frame.length === lastFrameSize) return;
+      lastFrameSize = frame.length;
       socket.volatile.emit('screen:frame', { sessionId, frame, width: screenWidth, height: screenHeight, timestamp: Date.now() });
     } catch {}
-  }, 150); // ~7 FPS
+  }, 100); // ~10 FPS
 }
 
 function stopStreaming() {
@@ -498,6 +528,7 @@ function connectWebSocket(serverUrl, deviceToken) {
       console.log('✅ Usuario AUTORIZÓ el control remoto');
       socket.emit('control:autorizado', { sessionId: data.sessionId, autorizado: true });
       startStreaming(socket, data.sessionId);
+      startChatWindow(socket, data.sessionId);
     } else {
       console.log('❌ Usuario RECHAZÓ el control remoto');
       socket.emit('control:autorizado', { sessionId: data.sessionId, autorizado: false });
@@ -506,17 +537,17 @@ function connectWebSocket(serverUrl, deviceToken) {
 
   socket.on('control:finalizado', () => {
     stopStreaming();
-    showChatNotification('La sesion de soporte ha finalizado. Gracias por usar la Mesa de Servicios.');
+    closeChatWindow();
   });
 
   // Input remoto
   socket.on('input:mouse', handleMouseInput);
   socket.on('input:teclado', handleKeyboardInput);
 
-  // Chat - mostrar mensajes del agente al usuario
+  // Chat - reenviar mensajes del agente a la ventana del cliente
   socket.on('chat:recibido', (data) => {
     console.log(`💬 Mensaje del soporte: ${data.contenido}`);
-    showChatNotification(data.contenido);
+    sendChatMessage(data.contenido);
   });
 
   // Transferencia de archivos
@@ -529,7 +560,8 @@ function connectWebSocket(serverUrl, deviceToken) {
 
   const cleanup = () => {
     stopStreaming();
-    if (psProcess) { psProcess.stdin.write('EXIT\n'); psProcess.kill(); }
+    closeChatWindow();
+    if (psProcess) { try { psProcess.stdin.write('EXIT\n'); psProcess.kill(); } catch {} }
     socket.disconnect();
     process.exit(0);
   };
