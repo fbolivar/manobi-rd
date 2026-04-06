@@ -211,57 +211,108 @@ function showAuthPopup() {
 }
 
 // ============================================
-// STREAMING - desktopCapturer (WebRTC nativo)
+// STREAMING - Captura GDI via PowerShell persistente
 // ============================================
 let screenSize = { width: 1920, height: 1080 };
+let captureProcess = null;
+let captureReady = false;
+let captureCallback = null;
+const captureTmpFile = path.join(os.tmpdir(), 'manobi-cap.jpg');
+
+function initCapture() {
+  const display = screen.getPrimaryDisplay();
+  screenSize = display.size;
+
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+$params = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 20L)
+$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$tw = [Math]::Min(800, $s.Width)
+$th = [int]($s.Height * $tw / $s.Width)
+Write-Host "READY"
+$f = '${captureTmpFile.replace(/\\/g, '\\\\')}'
+while ($true) {
+    $line = [Console]::ReadLine()
+    if ($line -eq $null -or $line -eq 'EXIT') { break }
+    if ($line -eq 'CAP') {
+        try {
+            $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+            $g = [System.Drawing.Graphics]::FromImage($b)
+            $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+            $g.Dispose()
+            $sm = New-Object System.Drawing.Bitmap($b, $tw, $th)
+            $b.Dispose()
+            $sm.Save($f, $enc, $params)
+            $sm.Dispose()
+            Write-Host "OK"
+        } catch { Write-Host "ERR" }
+    }
+}
+`;
+
+  const scriptPath = path.join(os.tmpdir(), 'manobi-cap-daemon.ps1');
+  const { writeFileSync } = require('fs');
+  writeFileSync(scriptPath, script);
+
+  const { spawn } = require('child_process');
+  captureProcess = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  captureProcess.stdout.on('data', (data) => {
+    const l = data.toString().trim();
+    if (l === 'READY') { captureReady = true; console.log('✅ Captura de pantalla inicializada'); }
+    if ((l === 'OK' || l === 'ERR') && captureCallback) { captureCallback(l === 'OK'); captureCallback = null; }
+  });
+  captureProcess.on('exit', () => { captureProcess = null; captureReady = false; });
+  captureProcess.stderr.on('data', () => {});
+}
+
+function captureFrame() {
+  return new Promise((resolve) => {
+    if (!captureProcess || !captureReady) { resolve(null); return; }
+    captureCallback = (ok) => {
+      if (!ok) { resolve(null); return; }
+      try { resolve(fs.readFileSync(captureTmpFile).toString('base64')); } catch { resolve(null); }
+    };
+    captureProcess.stdin.write('CAP\n');
+    setTimeout(() => { if (captureCallback) { captureCallback = null; resolve(null); } }, 3000);
+  });
+}
 
 function startStreaming(sessionId) {
   if (isStreaming) stopStreaming();
   isStreaming = true;
   currentSessionId = sessionId;
 
-  const display = screen.getPrimaryDisplay();
-  screenSize = display.size;
+  if (!captureReady) initCapture();
+
   console.log(`📺 Streaming iniciado: ${sessionId} (${screenSize.width}x${screenSize.height})`);
 
-  // Captura rápida con desktopCapturer + NativeImage
   let lastSize = 0;
+  let busy = false;
 
-  async function captureLoop() {
-    if (!isStreaming) return;
-
+  async function loop() {
+    if (!isStreaming || busy) return;
+    busy = true;
     try {
-      const sources = await desktopCapturer.getSources({
-        types: ['screen'],
-        thumbnailSize: { width: 800, height: 450 },
-      });
-
-      if (sources.length > 0) {
-        const thumbnail = sources[0].thumbnail;
-        if (!thumbnail.isEmpty()) {
-          const jpegBuffer = thumbnail.toJPEG(25);
-          const base64 = jpegBuffer.toString('base64');
-
-          if (base64.length !== lastSize) {
-            lastSize = base64.length;
-            socket.volatile.emit('screen:frame', {
-              sessionId,
-              frame: base64,
-              width: screenSize.width,
-              height: screenSize.height,
-              timestamp: Date.now(),
-            });
-          }
-        }
+      const frame = await captureFrame();
+      if (frame && frame.length !== lastSize && isStreaming) {
+        lastSize = frame.length;
+        socket.volatile.emit('screen:frame', {
+          sessionId, frame,
+          width: screenSize.width, height: screenSize.height,
+          timestamp: Date.now(),
+        });
       }
-    } catch (err) {
-      // Ignorar errores DXGI, el siguiente intento puede funcionar
-    }
-
-    if (isStreaming) setTimeout(captureLoop, 200); // ~5 FPS estable
+    } catch {}
+    busy = false;
+    if (isStreaming) setTimeout(loop, 150);
   }
-
-  captureLoop();
+  loop();
 }
 
 function stopStreaming() {
