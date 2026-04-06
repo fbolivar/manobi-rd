@@ -287,17 +287,38 @@ async function createPlaceholderFrame() {
   return Buffer.from(svg).toString('base64');
 }
 
+let lastFrameHash = '';
+
+function simpleHash(str) {
+  let hash = 0;
+  // Solo comparar primeros 500 chars para velocidad
+  const sample = str.substring(0, 500) + str.substring(str.length - 500);
+  for (let i = 0; i < sample.length; i++) {
+    const char = sample.charCodeAt(i);
+    hash = ((hash << 5) - hash) + char;
+    hash = hash & hash;
+  }
+  return hash.toString();
+}
+
 function startStreaming(socket, sessionId) {
   if (isStreaming) return;
   isStreaming = true;
   currentSessionId = sessionId;
+  lastFrameHash = '';
   console.log(`📺 Iniciando streaming para sesión ${sessionId}`);
 
-  // Capturar y enviar frames a ~5 FPS
+  // Capturar y enviar frames a ~8 FPS
   streamingInterval = setInterval(async () => {
     try {
       const frame = await captureScreen();
-      socket.emit('screen:frame', {
+
+      // Solo enviar si el frame cambió (delta)
+      const hash = simpleHash(frame);
+      if (hash === lastFrameHash) return;
+      lastFrameHash = hash;
+
+      socket.volatile.emit('screen:frame', {
         sessionId,
         frame,
         width: screenWidth,
@@ -307,7 +328,7 @@ function startStreaming(socket, sessionId) {
     } catch (err) {
       console.error('Error en streaming:', err.message);
     }
-  }, 200); // 5 FPS
+  }, 125); // ~8 FPS
 }
 
 function stopStreaming() {
@@ -321,65 +342,222 @@ function stopStreaming() {
 }
 
 // ============================================
-// CONTROL DE INPUT (mouse + teclado)
+// CONTROL DE INPUT (mouse + teclado) - Nativo
 // ============================================
-function handleMouseInput(data) {
-  if (!robot) return;
+const { exec } = require('child_process');
 
+// Inyectar helper de C# para input en Windows (se compila una sola vez)
+let inputHelperReady = false;
+const inputHelperPath = path.join(os.tmpdir(), 'manobi-input.ps1');
+
+function initInputHelper() {
+  if (process.platform !== 'win32') return;
+
+  const helperScript = `
+Add-Type -TypeDefinition @"
+using System;
+using System.Runtime.InteropServices;
+public class ManobiInput {
+    [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
+    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
+
+    public static void MoveTo(int x, int y) { SetCursorPos(x, y); }
+    public static void LeftClick(int x, int y) {
+        SetCursorPos(x, y);
+        mouse_event(0x0002, 0, 0, 0, 0); // LEFTDOWN
+        mouse_event(0x0004, 0, 0, 0, 0); // LEFTUP
+    }
+    public static void RightClick(int x, int y) {
+        SetCursorPos(x, y);
+        mouse_event(0x0008, 0, 0, 0, 0); // RIGHTDOWN
+        mouse_event(0x0010, 0, 0, 0, 0); // RIGHTUP
+    }
+    public static void DoubleClick(int x, int y) {
+        SetCursorPos(x, y);
+        mouse_event(0x0002, 0, 0, 0, 0);
+        mouse_event(0x0004, 0, 0, 0, 0);
+        mouse_event(0x0002, 0, 0, 0, 0);
+        mouse_event(0x0004, 0, 0, 0, 0);
+    }
+    public static void KeyPress(byte vk) {
+        keybd_event(vk, 0, 0, 0);
+        keybd_event(vk, 0, 0x0002, 0); // KEYUP
+    }
+    public static void KeyDown(byte vk) { keybd_event(vk, 0, 0, 0); }
+    public static void KeyUp(byte vk) { keybd_event(vk, 0, 0x0002, 0); }
+}
+"@
+$action = $args[0]
+switch ($action) {
+    "move"    { [ManobiInput]::MoveTo([int]$args[1], [int]$args[2]) }
+    "click"   { [ManobiInput]::LeftClick([int]$args[1], [int]$args[2]) }
+    "rclick"  { [ManobiInput]::RightClick([int]$args[1], [int]$args[2]) }
+    "dblclick"{ [ManobiInput]::DoubleClick([int]$args[1], [int]$args[2]) }
+    "key"     { [ManobiInput]::KeyPress([byte]$args[1]) }
+    "keydown" { [ManobiInput]::KeyDown([byte]$args[1]) }
+    "keyup"   { [ManobiInput]::KeyUp([byte]$args[1]) }
+}
+`;
+
+  try {
+    fs.writeFileSync(inputHelperPath, helperScript);
+    inputHelperReady = true;
+    console.log('✅ Control de input inicializado');
+  } catch (err) {
+    console.log('❌ No se pudo inicializar input:', err.message);
+  }
+}
+
+function sendInput(action, ...args) {
+  if (!inputHelperReady) return;
+  const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${inputHelperPath}" ${action} ${args.join(' ')}`;
+  exec(cmd, { timeout: 2000 }, () => {});
+}
+
+function handleMouseInput(data) {
   const absX = Math.round(data.x * screenWidth);
   const absY = Math.round(data.y * screenHeight);
 
-  try {
+  if (process.platform === 'win32' && inputHelperReady) {
     switch (data.type) {
       case 'mousemove':
-        robot.moveMouse(absX, absY);
+        sendInput('move', absX, absY);
         break;
       case 'click':
       case 'mousedown':
-        robot.moveMouse(absX, absY);
-        robot.mouseClick(data.button === 2 ? 'right' : 'left');
+        if (data.button === 2) {
+          sendInput('rclick', absX, absY);
+        } else {
+          sendInput('click', absX, absY);
+        }
         break;
       case 'dblclick':
-        robot.moveMouse(absX, absY);
-        robot.mouseClick('left', true);
+        sendInput('dblclick', absX, absY);
         break;
       case 'contextmenu':
-        robot.moveMouse(absX, absY);
-        robot.mouseClick('right');
+        sendInput('rclick', absX, absY);
         break;
     }
-  } catch (err) {
-    // Silenciar errores de input
+  } else if (robot) {
+    try {
+      robot.moveMouse(absX, absY);
+      if (data.type === 'click' || data.type === 'mousedown') {
+        robot.mouseClick(data.button === 2 ? 'right' : 'left');
+      }
+    } catch {}
   }
 }
 
 function handleKeyboardInput(data) {
-  if (!robot) return;
   if (data.type !== 'keydown') return;
 
-  try {
-    const modifiers = (data.modifiers || []).filter(Boolean);
-    const key = mapKey(data.key);
-    if (key) {
-      robot.keyTap(key, modifiers);
+  if (process.platform === 'win32' && inputHelperReady) {
+    const vk = mapKeyToVK(data.key);
+    if (vk !== null) {
+      // Manejar modificadores
+      const mods = data.modifiers || [];
+      if (mods.includes('ctrl')) sendInput('keydown', 0x11);
+      if (mods.includes('shift')) sendInput('keydown', 0x10);
+      if (mods.includes('alt')) sendInput('keydown', 0x12);
+
+      sendInput('key', vk);
+
+      if (mods.includes('alt')) sendInput('keyup', 0x12);
+      if (mods.includes('shift')) sendInput('keyup', 0x10);
+      if (mods.includes('ctrl')) sendInput('keyup', 0x11);
     }
-  } catch (err) {
-    // Silenciar errores de input
+  } else if (robot) {
+    try {
+      const modifiers = (data.modifiers || []).filter(Boolean);
+      const key = mapKeyRobotJS(data.key);
+      if (key) robot.keyTap(key, modifiers);
+    } catch {}
   }
 }
 
-function mapKey(key) {
+function mapKeyToVK(key) {
+  const vkMap = {
+    'Enter': 0x0D, 'Backspace': 0x08, 'Tab': 0x09, 'Escape': 0x1B,
+    'Delete': 0x2E, 'Home': 0x24, 'End': 0x23, 'PageUp': 0x21, 'PageDown': 0x22,
+    'ArrowUp': 0x26, 'ArrowDown': 0x28, 'ArrowLeft': 0x25, 'ArrowRight': 0x27,
+    ' ': 0x20, 'F1': 0x70, 'F2': 0x71, 'F3': 0x72, 'F4': 0x73, 'F5': 0x74,
+    'F6': 0x75, 'F7': 0x76, 'F8': 0x77, 'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B,
+  };
+  if (vkMap[key] !== undefined) return vkMap[key];
+  // Letras y números
+  if (key.length === 1) {
+    const code = key.toUpperCase().charCodeAt(0);
+    if (code >= 0x30 && code <= 0x5A) return code; // 0-9, A-Z
+  }
+  return null;
+}
+
+function mapKeyRobotJS(key) {
   const keyMap = {
     'Enter': 'enter', 'Backspace': 'backspace', 'Tab': 'tab',
-    'Escape': 'escape', 'Delete': 'delete', 'Home': 'home',
-    'End': 'end', 'PageUp': 'pageup', 'PageDown': 'pagedown',
+    'Escape': 'escape', 'Delete': 'delete', ' ': 'space',
     'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
-    ' ': 'space', 'Control': 'control', 'Shift': 'shift', 'Alt': 'alt',
-    'F1': 'f1', 'F2': 'f2', 'F3': 'f3', 'F4': 'f4', 'F5': 'f5',
-    'F6': 'f6', 'F7': 'f7', 'F8': 'f8', 'F9': 'f9', 'F10': 'f10',
-    'F11': 'f11', 'F12': 'f12',
   };
   return keyMap[key] || (key.length === 1 ? key.toLowerCase() : null);
+}
+
+// ============================================
+// TRANSFERENCIA DE ARCHIVOS
+// ============================================
+function handleFileUpload(socket) {
+  // Recibir archivo del panel web
+  socket.on('file:upload', (data, callback) => {
+    const { fileName, fileData, destPath } = data;
+    const targetPath = destPath || path.join(os.homedir(), 'Desktop', fileName);
+
+    try {
+      const buffer = Buffer.from(fileData, 'base64');
+      fs.writeFileSync(targetPath, buffer);
+      console.log(`📁 Archivo recibido: ${fileName} -> ${targetPath}`);
+      if (callback) callback({ success: true, path: targetPath });
+    } catch (err) {
+      console.error(`❌ Error guardando archivo: ${err.message}`);
+      if (callback) callback({ success: false, error: err.message });
+    }
+  });
+
+  // Enviar archivo al panel web
+  socket.on('file:download', (data, callback) => {
+    const { filePath } = data;
+    try {
+      const buffer = fs.readFileSync(filePath);
+      const fileName = path.basename(filePath);
+      const stats = fs.statSync(filePath);
+      console.log(`📁 Enviando archivo: ${filePath}`);
+      if (callback) {
+        callback({
+          success: true,
+          fileName,
+          fileData: buffer.toString('base64'),
+          size: stats.size,
+        });
+      }
+    } catch (err) {
+      console.error(`❌ Error leyendo archivo: ${err.message}`);
+      if (callback) callback({ success: false, error: err.message });
+    }
+  });
+
+  // Listar archivos de un directorio
+  socket.on('file:list', (data, callback) => {
+    const dirPath = data.path || os.homedir();
+    try {
+      const items = fs.readdirSync(dirPath, { withFileTypes: true }).map(item => ({
+        name: item.name,
+        isDirectory: item.isDirectory(),
+        path: path.join(dirPath, item.name),
+      }));
+      if (callback) callback({ success: true, items, currentPath: dirPath });
+    } catch (err) {
+      if (callback) callback({ success: false, error: err.message });
+    }
+  });
 }
 
 // ============================================
@@ -403,7 +581,8 @@ function main() {
   console.log(`Usuario: ${systemInfo.usuario_actual}`);
   console.log(`Servidor: ${config.server_url}`);
   console.log(`Captura: ${screenshot ? '✅ Disponible' : '❌ No disponible'}`);
-  console.log(`Input: ${robot ? '✅ Disponible' : '❌ No disponible'}`);
+  initInputHelper();
+  console.log(`Input: ${inputHelperReady ? '✅ Nativo' : (robot ? '✅ RobotJS' : '❌ No disponible')}`);
   console.log('');
 
   const serverHttp = config.server_url.replace('ws://', 'http://').replace('wss://', 'https://');
@@ -467,6 +646,9 @@ function connectWebSocket(serverUrl, deviceToken) {
   socket.on('input:teclado', (data) => {
     handleKeyboardInput(data);
   });
+
+  // Transferencia de archivos
+  handleFileUpload(socket);
 
   // Heartbeat
   setInterval(() => {
