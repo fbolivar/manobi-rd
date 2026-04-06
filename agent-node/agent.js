@@ -9,17 +9,28 @@ const { execSync } = require('child_process');
 // BC Fabric SAS - Colombia
 // ============================================
 
+// Módulos opcionales (captura + input)
+let screenshot, sharp, robot;
+try { screenshot = require('screenshot-desktop'); } catch { screenshot = null; }
+try { sharp = require('sharp'); } catch { sharp = null; }
+try { robot = require('robotjs'); } catch { robot = null; }
+
 const CONFIG_PATH = process.platform === 'win32'
   ? 'C:\\ProgramData\\ManobiRD\\config.json'
   : '/etc/manobi-rd/config.json';
 
+// Estado de streaming
+let isStreaming = false;
+let streamingInterval = null;
+let currentSessionId = null;
+let screenWidth = 1920;
+let screenHeight = 1080;
+
 function loadConfig() {
-  // Intentar cargar config del archivo
   try {
     const data = fs.readFileSync(CONFIG_PATH, 'utf8');
     return JSON.parse(data);
   } catch {
-    // Config por defecto o desde argumentos
     const serverArg = process.argv[2] || 'http://192.168.50.5:3001';
     return { server_url: serverArg, token: '' };
   }
@@ -30,7 +41,6 @@ function getSystemInfo() {
   const platform = os.platform();
   const interfaces = os.networkInterfaces();
 
-  // Obtener IP principal
   let ip = '';
   let mac = '';
   for (const [name, addrs] of Object.entries(interfaces)) {
@@ -43,7 +53,6 @@ function getSystemInfo() {
     }
   }
 
-  // Sistema operativo
   let sistemaOp = 'linux';
   let versionSO = '';
   if (platform === 'win32') {
@@ -64,7 +73,6 @@ function getSystemInfo() {
     }
   }
 
-  // Detectar dominio
   let enDominio = false;
   let nombreDominio = '';
   if (platform === 'win32') {
@@ -76,19 +84,14 @@ function getSystemInfo() {
     }
   }
 
-  // Usuario actual
   const usuario = os.userInfo().username;
-
-  // CPU
   const cpus = os.cpus();
   const cpuInfo = cpus.length > 0 ? `${cpus[0].model} (${cpus.length} cores)` : 'Desconocido';
-
-  // RAM en MB
   const ramMB = Math.round(os.totalmem() / 1024 / 1024);
 
   return {
     nombre: hostname,
-    hostname: hostname,
+    hostname,
     direccion_ip: ip,
     direccion_mac: mac !== '00:00:00:00:00:00' ? mac : '',
     sistema_operativo: sistemaOp,
@@ -113,6 +116,162 @@ function saveToken(token) {
   }
 }
 
+// ============================================
+// CAPTURA DE PANTALLA
+// ============================================
+async function captureScreen() {
+  if (!screenshot) {
+    // Fallback: generar imagen de placeholder
+    return createPlaceholderFrame();
+  }
+
+  try {
+    const imgBuffer = await screenshot({ format: 'png' });
+
+    if (sharp) {
+      // Comprimir con sharp a JPEG calidad 40 y redimensionar
+      const compressed = await sharp(imgBuffer)
+        .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
+        .jpeg({ quality: 40 })
+        .toBuffer();
+
+      // Obtener dimensiones
+      const metadata = await sharp(imgBuffer).metadata();
+      screenWidth = metadata.width || 1920;
+      screenHeight = metadata.height || 1080;
+
+      return compressed.toString('base64');
+    }
+
+    // Sin sharp, enviar PNG directo (más pesado)
+    return imgBuffer.toString('base64');
+  } catch (err) {
+    console.error('Error capturando pantalla:', err.message);
+    return createPlaceholderFrame();
+  }
+}
+
+function createPlaceholderFrame() {
+  // Crear SVG como placeholder cuando no hay captura disponible
+  const svg = `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
+    <rect width="100%" height="100%" fill="#1a1a2e"/>
+    <text x="640" y="340" font-family="Arial" font-size="32" fill="#e0e0e0" text-anchor="middle">
+      Manobi-RD - ${os.hostname()}
+    </text>
+    <text x="640" y="390" font-family="Arial" font-size="20" fill="#888" text-anchor="middle">
+      Captura de pantalla no disponible en este equipo
+    </text>
+    <text x="640" y="430" font-family="Arial" font-size="16" fill="#666" text-anchor="middle">
+      Instale las dependencias de captura para habilitar esta funcion
+    </text>
+  </svg>`;
+
+  if (sharp) {
+    return sharp(Buffer.from(svg)).jpeg({ quality: 50 }).toBuffer()
+      .then(buf => buf.toString('base64'))
+      .catch(() => Buffer.from(svg).toString('base64'));
+  }
+  return Buffer.from(svg).toString('base64');
+}
+
+function startStreaming(socket, sessionId) {
+  if (isStreaming) return;
+  isStreaming = true;
+  currentSessionId = sessionId;
+  console.log(`📺 Iniciando streaming para sesión ${sessionId}`);
+
+  // Capturar y enviar frames a ~5 FPS
+  streamingInterval = setInterval(async () => {
+    try {
+      const frame = await captureScreen();
+      socket.emit('screen:frame', {
+        sessionId,
+        frame,
+        width: screenWidth,
+        height: screenHeight,
+        timestamp: Date.now(),
+      });
+    } catch (err) {
+      console.error('Error en streaming:', err.message);
+    }
+  }, 200); // 5 FPS
+}
+
+function stopStreaming() {
+  if (streamingInterval) {
+    clearInterval(streamingInterval);
+    streamingInterval = null;
+  }
+  isStreaming = false;
+  currentSessionId = null;
+  console.log('📺 Streaming detenido');
+}
+
+// ============================================
+// CONTROL DE INPUT (mouse + teclado)
+// ============================================
+function handleMouseInput(data) {
+  if (!robot) return;
+
+  const absX = Math.round(data.x * screenWidth);
+  const absY = Math.round(data.y * screenHeight);
+
+  try {
+    switch (data.type) {
+      case 'mousemove':
+        robot.moveMouse(absX, absY);
+        break;
+      case 'click':
+      case 'mousedown':
+        robot.moveMouse(absX, absY);
+        robot.mouseClick(data.button === 2 ? 'right' : 'left');
+        break;
+      case 'dblclick':
+        robot.moveMouse(absX, absY);
+        robot.mouseClick('left', true);
+        break;
+      case 'contextmenu':
+        robot.moveMouse(absX, absY);
+        robot.mouseClick('right');
+        break;
+    }
+  } catch (err) {
+    // Silenciar errores de input
+  }
+}
+
+function handleKeyboardInput(data) {
+  if (!robot) return;
+  if (data.type !== 'keydown') return;
+
+  try {
+    const modifiers = (data.modifiers || []).filter(Boolean);
+    const key = mapKey(data.key);
+    if (key) {
+      robot.keyTap(key, modifiers);
+    }
+  } catch (err) {
+    // Silenciar errores de input
+  }
+}
+
+function mapKey(key) {
+  const keyMap = {
+    'Enter': 'enter', 'Backspace': 'backspace', 'Tab': 'tab',
+    'Escape': 'escape', 'Delete': 'delete', 'Home': 'home',
+    'End': 'end', 'PageUp': 'pageup', 'PageDown': 'pagedown',
+    'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
+    ' ': 'space', 'Control': 'control', 'Shift': 'shift', 'Alt': 'alt',
+    'F1': 'f1', 'F2': 'f2', 'F3': 'f3', 'F4': 'f4', 'F5': 'f5',
+    'F6': 'f6', 'F7': 'f7', 'F8': 'f8', 'F9': 'f9', 'F10': 'f10',
+    'F11': 'f11', 'F12': 'f12',
+  };
+  return keyMap[key] || (key.length === 1 ? key.toLowerCase() : null);
+}
+
+// ============================================
+// CONEXIÓN PRINCIPAL
+// ============================================
 function main() {
   console.log('╔══════════════════════════════════════╗');
   console.log('║      Manobi-RD Agente v1.0           ║');
@@ -130,9 +289,10 @@ function main() {
   console.log(`CPU: ${systemInfo.cpu_info}`);
   console.log(`Usuario: ${systemInfo.usuario_actual}`);
   console.log(`Servidor: ${config.server_url}`);
+  console.log(`Captura: ${screenshot ? '✅ Disponible' : '❌ No disponible'}`);
+  console.log(`Input: ${robot ? '✅ Disponible' : '❌ No disponible'}`);
   console.log('');
 
-  // Primero registrar el dispositivo via HTTP
   const serverHttp = config.server_url.replace('ws://', 'http://').replace('wss://', 'https://');
 
   console.log('Registrando dispositivo...');
@@ -143,22 +303,18 @@ function main() {
   })
     .then(res => res.json())
     .then(device => {
-      console.log(`✅ Registrado como: ${device.nombre} (ID: ${device.id})`);
-      console.log(`Token: ${device.token_agente}`);
+      console.log(`✅ Registrado: ${device.nombre} (${device.id})`);
       saveToken(device.token_agente);
-
-      // Conectar WebSocket
-      connectWebSocket(config.server_url, device.token_agente, systemInfo);
+      connectWebSocket(config.server_url, device.token_agente);
     })
     .catch(err => {
       console.error('Error registrando:', err.message);
-      // Reintentar en 10 segundos
       console.log('Reintentando en 10 segundos...');
       setTimeout(() => main(), 10000);
     });
 }
 
-function connectWebSocket(serverUrl, deviceToken, systemInfo) {
+function connectWebSocket(serverUrl, deviceToken) {
   console.log('Conectando WebSocket...');
 
   const socket = io(serverUrl, {
@@ -167,6 +323,7 @@ function connectWebSocket(serverUrl, deviceToken, systemInfo) {
     reconnection: true,
     reconnectionDelay: 5000,
     reconnectionAttempts: Infinity,
+    maxHttpBufferSize: 10e6, // 10MB para frames
   });
 
   socket.on('connect', () => {
@@ -175,45 +332,48 @@ function connectWebSocket(serverUrl, deviceToken, systemInfo) {
 
   socket.on('disconnect', (reason) => {
     console.log(`🔌 Desconectado: ${reason}`);
+    stopStreaming();
   });
 
-  socket.on('reconnect', () => {
-    console.log('🔄 Reconectado');
-  });
-
-  // Escuchar solicitudes de control remoto
+  // Control remoto - solicitud
   socket.on('control:solicitud', (data) => {
-    console.log(`📺 Solicitud de control remoto - Sesión: ${data.sessionId}`);
-    // Aceptar la solicitud
-    socket.emit('control:aceptado', { sessionId: data.sessionId });
+    console.log(`📺 Solicitud de control - Sesión: ${data.sessionId}`);
+    startStreaming(socket, data.sessionId);
   });
 
-  // Escuchar mensajes de chat
-  socket.on('chat:mensaje', (data) => {
-    console.log(`💬 Mensaje del agente: ${data.contenido}`);
+  // Control remoto - finalizar
+  socket.on('control:finalizado', () => {
+    stopStreaming();
   });
 
-  // Heartbeat cada 30 segundos
+  // Input remoto
+  socket.on('input:mouse', (data) => {
+    handleMouseInput(data);
+  });
+
+  socket.on('input:teclado', (data) => {
+    handleKeyboardInput(data);
+  });
+
+  // Heartbeat
   setInterval(() => {
-    const currentUser = os.userInfo().username;
     socket.emit('heartbeat', {
-      usuario_actual: currentUser,
+      usuario_actual: os.userInfo().username,
     });
   }, 30000);
 
-  // Manejar señales de terminación
   process.on('SIGINT', () => {
     console.log('\nDesconectando...');
+    stopStreaming();
     socket.disconnect();
     process.exit(0);
   });
 
   process.on('SIGTERM', () => {
-    console.log('\nDesconectando...');
+    stopStreaming();
     socket.disconnect();
     process.exit(0);
   });
 }
 
-// Iniciar
 main();

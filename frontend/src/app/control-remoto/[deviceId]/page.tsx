@@ -10,29 +10,46 @@ export default function ControlRemotoPage() {
   const router = useRouter();
   const deviceId = params.deviceId as string;
 
-  const videoRef = useRef<HTMLVideoElement>(null);
-  const peerRef = useRef<RTCPeerConnection | null>(null);
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const imgRef = useRef<HTMLImageElement | null>(null);
 
   const [device, setDevice] = useState<Dispositivo | null>(null);
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [connected, setConnected] = useState(false);
+  const [fps, setFps] = useState(0);
   const [mensajes, setMensajes] = useState<Mensaje[]>([]);
   const [nuevoMensaje, setNuevoMensaje] = useState('');
   const [showChat, setShowChat] = useState(false);
   const [fullscreen, setFullscreen] = useState(false);
 
   const socket = getSocket();
+  const frameCountRef = useRef(0);
+  const sessionIdRef = useRef<string | null>(null);
 
   useEffect(() => {
     loadDevice();
+
+    // Precrear imagen para renderizar frames
+    imgRef.current = new Image();
+
     return () => {
-      if (sessionId) {
-        socket.emit('control:finalizar', { sessionId, deviceId });
+      if (sessionIdRef.current) {
+        socket.emit('control:finalizar', { sessionId: sessionIdRef.current, deviceId });
       }
-      peerRef.current?.close();
+      socket.off('screen:frame');
+      socket.off('control:sesion-creada');
+      socket.off('control:error');
     };
   }, [deviceId]);
+
+  // Contador de FPS
+  useEffect(() => {
+    const interval = setInterval(() => {
+      setFps(frameCountRef.current);
+      frameCountRef.current = 0;
+    }, 1000);
+    return () => clearInterval(interval);
+  }, []);
 
   async function loadDevice() {
     try {
@@ -43,84 +60,73 @@ export default function ControlRemotoPage() {
     }
   }
 
-  async function startSession() {
-    socket.emit('control:solicitar', { deviceId });
+  function startSession() {
+    // Escuchar frames de pantalla
+    socket.on('screen:frame', (data: { frame: string; width: number; height: number }) => {
+      renderFrame(data.frame, data.width, data.height);
+      frameCountRef.current++;
+    });
 
-    socket.on('control:sesion-creada', async (data: { sessionId: string }) => {
+    socket.on('control:sesion-creada', (data: { sessionId: string }) => {
       setSessionId(data.sessionId);
-      await setupWebRTC(data.sessionId);
+      sessionIdRef.current = data.sessionId;
+      setConnected(true);
+
+      // Escuchar chat de esta sesión
+      socket.on(`chat:${data.sessionId}`, (msg: Mensaje) => {
+        setMensajes((prev) => [...prev, msg]);
+      });
     });
 
     socket.on('control:error', (data: { message: string }) => {
       alert(data.message);
     });
+
+    // Solicitar control
+    socket.emit('control:solicitar', { deviceId });
   }
 
-  async function setupWebRTC(sid: string) {
-    const turnServer = process.env.NEXT_PUBLIC_TURN_SERVER || 'turn:localhost:3478';
-    const pc = new RTCPeerConnection({
-      iceServers: [
-        { urls: 'stun:stun.l.google.com:19302' },
-        {
-          urls: turnServer,
-          username: 'manobi',
-          credential: 'ManobiTurn2024!',
-        },
-      ],
-    });
+  function renderFrame(frameBase64: string, width: number, height: number) {
+    const canvas = canvasRef.current;
+    const img = imgRef.current;
+    if (!canvas || !img) return;
 
-    peerRef.current = pc;
+    const ctx = canvas.getContext('2d');
+    if (!ctx) return;
 
-    pc.ontrack = (event) => {
-      if (videoRef.current && event.streams[0]) {
-        videoRef.current.srcObject = event.streams[0];
-        setConnected(true);
-      }
+    // Ajustar tamaño del canvas
+    if (canvas.width !== width || canvas.height !== height) {
+      canvas.width = width || 1280;
+      canvas.height = height || 720;
+    }
+
+    // Detectar formato (JPEG base64 o SVG)
+    const isJpeg = !frameBase64.startsWith('PHN2');
+    const src = isJpeg
+      ? `data:image/jpeg;base64,${frameBase64}`
+      : `data:image/svg+xml;base64,${frameBase64}`;
+
+    img.onload = () => {
+      ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
     };
-
-    pc.onicecandidate = (event) => {
-      if (event.candidate) {
-        socket.emit('webrtc:ice-candidate', {
-          targetId: deviceId,
-          candidate: event.candidate,
-          sessionId: sid,
-        });
-      }
-    };
-
-    // Escuchar la respuesta WebRTC del agente
-    socket.on('webrtc:answer', (data: { answer: RTCSessionDescriptionInit }) => {
-      pc.setRemoteDescription(new RTCSessionDescription(data.answer));
-    });
-
-    socket.on('webrtc:ice-candidate', (data: { candidate: RTCIceCandidateInit }) => {
-      pc.addIceCandidate(new RTCIceCandidate(data.candidate));
-    });
-
-    // Escuchar chat
-    socket.on(`chat:${sid}`, (msg: Mensaje) => {
-      setMensajes((prev) => [...prev, msg]);
-    });
-
-    // Crear oferta
-    const offer = await pc.createOffer({ offerToReceiveVideo: true, offerToReceiveAudio: true });
-    await pc.setLocalDescription(offer);
-    socket.emit('webrtc:offer', { targetId: deviceId, offer, sessionId: sid });
+    img.src = src;
   }
 
   function endSession() {
     if (sessionId) {
       socket.emit('control:finalizar', { sessionId, deviceId });
-      peerRef.current?.close();
+      socket.off('screen:frame');
+      socket.off(`chat:${sessionId}`);
       setConnected(false);
       setSessionId(null);
+      sessionIdRef.current = null;
     }
   }
 
-  // Enviar eventos de mouse
-  const handleMouseEvent = useCallback((e: React.MouseEvent<HTMLVideoElement>) => {
-    if (!connected || !videoRef.current) return;
-    const rect = videoRef.current.getBoundingClientRect();
+  // Enviar eventos de mouse sobre el canvas
+  const handleMouseEvent = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!connected || !canvasRef.current) return;
+    const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
 
@@ -186,7 +192,10 @@ export default function ControlRemotoPage() {
             </p>
           </div>
           {connected && (
-            <span className="badge-online ml-2">Conectado</span>
+            <>
+              <span className="badge-online ml-2">Conectado</span>
+              <span className="text-xs text-gray-500 ml-2">{fps} FPS</span>
+            </>
           )}
         </div>
 
@@ -211,15 +220,16 @@ export default function ControlRemotoPage() {
         </div>
       </div>
 
-      {/* Área de video */}
+      {/* Area de visualización */}
       <div className="flex flex-1">
         <div className={`flex-1 bg-black flex items-center justify-center ${fullscreen ? 'h-[calc(100vh-64px)]' : 'h-[calc(100vh-180px)]'}`}>
           {connected ? (
-            <video
-              ref={videoRef}
-              autoPlay
-              playsInline
+            <canvas
+              ref={canvasRef}
+              width={1280}
+              height={720}
               className="w-full h-full object-contain cursor-crosshair"
+              tabIndex={0}
               onMouseDown={handleMouseEvent}
               onMouseUp={handleMouseEvent}
               onMouseMove={handleMouseEvent}
@@ -234,11 +244,10 @@ export default function ControlRemotoPage() {
               </svg>
               <p className="text-gray-500 text-lg">Haz clic en &quot;Iniciar Control Remoto&quot; para conectarte</p>
               <p className="text-gray-600 text-sm mt-2">
-                Se establecerá una conexión WebRTC segura con el dispositivo
+                Se transmitira la pantalla del equipo remoto en tiempo real
               </p>
             </div>
           )}
-          <canvas ref={canvasRef} className="hidden" />
         </div>
 
         {/* Panel de Chat */}

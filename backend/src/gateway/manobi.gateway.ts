@@ -24,6 +24,7 @@ interface AgentSocket extends Socket {
   cors: { origin: '*' },
   namespace: '/',
   transports: ['websocket', 'polling'],
+  maxHttpBufferSize: 10e6, // 10MB para frames de pantalla
 })
 export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
   @WebSocketServer()
@@ -33,6 +34,8 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
   private agentSockets = new Map<string, string>();
   // Mapeo de agentes (usuarios) conectados: userId -> socketId
   private userSockets = new Map<string, string>();
+  // Mapeo de sesiones activas: sessionId -> userId (quién está mirando)
+  private sessionViewers = new Map<string, string>();
 
   constructor(
     private readonly jwtService: JwtService,
@@ -124,7 +127,29 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
       userId: client.userId,
     });
 
+    // Registrar quién está mirando esta sesión
+    this.sessionViewers.set(session.id, client.userId!);
+
     client.emit('control:sesion-creada', { sessionId: session.id });
+  }
+
+  // ==========================================
+  // SCREEN FRAMES - Reenviar del agente al visor
+  // ==========================================
+
+  @SubscribeMessage('screen:frame')
+  handleScreenFrame(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { sessionId: string; frame: string; width: number; height: number; timestamp: number },
+  ) {
+    // Encontrar quién está mirando esta sesión
+    const viewerUserId = this.sessionViewers.get(data.sessionId);
+    if (viewerUserId) {
+      const viewerSocketId = this.userSockets.get(viewerUserId);
+      if (viewerSocketId) {
+        this.server.to(viewerSocketId).emit('screen:frame', data);
+      }
+    }
   }
 
   @SubscribeMessage('webrtc:offer')
@@ -224,6 +249,7 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect {
     @MessageBody() data: { sessionId: string; deviceId: string },
   ) {
     await this.sessionsService.end(data.sessionId);
+    this.sessionViewers.delete(data.sessionId);
 
     const agentSocketId = this.agentSockets.get(data.deviceId);
     if (agentSocketId) {
