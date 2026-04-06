@@ -146,10 +146,11 @@ export default function ControlRemotoPage() {
   }
 
   // ==========================================
-  // MOUSE
+  // MOUSE - Solo enviar clics, NO movimiento
   // ==========================================
-  const handleMouseEvent = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
     if (!connected || !inputEnabled || !canvasRef.current) return;
+    e.preventDefault();
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
@@ -158,8 +159,40 @@ export default function ControlRemotoPage() {
       deviceId,
       x: Math.max(0, Math.min(1, x)),
       y: Math.max(0, Math.min(1, y)),
-      type: e.type,
+      type: 'click',
       button: e.button,
+    });
+  }, [connected, inputEnabled, deviceId]);
+
+  const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!connected || !inputEnabled || !canvasRef.current) return;
+    e.preventDefault();
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+
+    socketRef.current.emit('input:mouse', {
+      deviceId,
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+      type: 'dblclick',
+      button: 0,
+    });
+  }, [connected, inputEnabled, deviceId]);
+
+  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
+    if (!connected || !inputEnabled || !canvasRef.current) return;
+    e.preventDefault();
+    const rect = canvasRef.current.getBoundingClientRect();
+    const x = (e.clientX - rect.left) / rect.width;
+    const y = (e.clientY - rect.top) / rect.height;
+
+    socketRef.current.emit('input:mouse', {
+      deviceId,
+      x: Math.max(0, Math.min(1, x)),
+      y: Math.max(0, Math.min(1, y)),
+      type: 'contextmenu',
+      button: 2,
     });
   }, [connected, inputEnabled, deviceId]);
 
@@ -196,18 +229,19 @@ export default function ControlRemotoPage() {
   }, [connected, inputEnabled, deviceId]);
 
   // ==========================================
-  // CHAT
+  // CHAT - via API REST
   // ==========================================
-  function sendMessage(e: React.FormEvent) {
+  async function sendMessage(e: React.FormEvent) {
     e.preventDefault();
     if (!nuevoMensaje.trim() || !sessionId) return;
 
-    socketRef.current.emit('chat:mensaje', {
-      sessionId,
-      contenido: nuevoMensaje,
-    });
-
-    setNuevoMensaje('');
+    try {
+      const msg = await api.enviarMensaje(sessionId, nuevoMensaje);
+      setMensajes((prev) => [...prev, msg as Mensaje]);
+      setNuevoMensaje('');
+    } catch (err) {
+      console.error('Error enviando mensaje:', err);
+    }
   }
 
   // ==========================================
@@ -375,12 +409,9 @@ export default function ControlRemotoPage() {
               height={720}
               className={`max-w-full max-h-full object-contain ${inputEnabled ? 'cursor-crosshair' : 'cursor-default'}`}
               tabIndex={0}
-              onMouseDown={handleMouseEvent}
-              onMouseUp={handleMouseEvent}
-              onMouseMove={handleMouseEvent}
-              onClick={(e) => { canvasRef.current?.focus(); handleMouseEvent(e); }}
-              onDoubleClick={handleMouseEvent}
-              onContextMenu={(e) => { e.preventDefault(); handleMouseEvent(e); }}
+              onClick={(e) => { canvasRef.current?.focus(); handleClick(e); }}
+              onDoubleClick={handleDoubleClick}
+              onContextMenu={handleContextMenu}
             />
           ) : (
             <div className="text-center">
