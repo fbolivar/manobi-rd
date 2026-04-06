@@ -375,9 +375,9 @@ function handleKeyboardInput(data) {
     return;
   }
 
-  // Espacio
+  // Espacio -> VK code directo
   if (key === ' ') {
-    sendInputCmd('T { }');
+    sendInputCmd('K 32');
     return;
   }
 
