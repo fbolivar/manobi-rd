@@ -73,7 +73,7 @@ export class SessionsService {
 
   async end(id: string): Promise<Sesion> {
     const session = await this.repo.findOne({ where: { id } });
-    if (!session || session.estado === 'finalizada') return session;
+    if (!session || session.estado === 'finalizada') return session as Sesion;
 
     session.estado = 'finalizada';
     session.fin = new Date();
