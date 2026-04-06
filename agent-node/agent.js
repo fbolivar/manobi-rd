@@ -241,6 +241,7 @@ function initInputSystem() {
   try {
     // Crear script PowerShell que se queda escuchando comandos via stdin
     const scriptContent = `
+Add-Type -AssemblyName System.Windows.Forms
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -261,7 +262,7 @@ while ($true) {
     $line = [Console]::ReadLine()
     if ($line -eq $null -or $line -eq "EXIT") { break }
     try {
-        $parts = $line.Split(' ')
+        $parts = $line.Split(' ', 3)
         switch ($parts[0]) {
             "C" { [MI]::Click([int]$parts[1], [int]$parts[2]) }
             "R" { [MI]::RClick([int]$parts[1], [int]$parts[2]) }
@@ -269,6 +270,7 @@ while ($true) {
             "K" { [MI]::Key([byte]$parts[1]) }
             "KD" { [MI]::KD([byte]$parts[1]) }
             "KU" { [MI]::KU([byte]$parts[1]) }
+            "T" { [System.Windows.Forms.SendKeys]::SendWait($parts[1]) }
         }
     } catch {}
 }
@@ -328,31 +330,66 @@ function handleMouseInput(data) {
 
 function handleKeyboardInput(data) {
   if (data.type !== 'keydown') return;
-  const vk = mapKeyToVK(data.key);
-  if (vk === null) return;
-  console.log(`⌨️ Tecla: ${data.key} (VK: ${vk})`);
 
   const mods = data.modifiers || [];
-  if (mods.includes('ctrl')) sendInputCmd('KD 17');
-  if (mods.includes('shift')) sendInputCmd('KD 16');
-  if (mods.includes('alt')) sendInputCmd('KD 18');
-  sendInputCmd(`K ${vk}`);
-  if (mods.includes('alt')) sendInputCmd('KU 18');
-  if (mods.includes('shift')) sendInputCmd('KU 16');
-  if (mods.includes('ctrl')) sendInputCmd('KU 17');
-}
+  const key = data.key;
 
-function mapKeyToVK(key) {
-  const map = {
+  // Teclas especiales -> usar VK codes
+  const specialVK = {
     'Enter': 13, 'Backspace': 8, 'Tab': 9, 'Escape': 27, 'Delete': 46,
     'Home': 36, 'End': 35, 'PageUp': 33, 'PageDown': 34,
     'ArrowUp': 38, 'ArrowDown': 40, 'ArrowLeft': 37, 'ArrowRight': 39,
-    ' ': 32, 'F1': 112, 'F2': 113, 'F3': 114, 'F4': 115, 'F5': 116,
+    'F1': 112, 'F2': 113, 'F3': 114, 'F4': 115, 'F5': 116,
     'F6': 117, 'F7': 118, 'F8': 119, 'F9': 120, 'F10': 121, 'F11': 122, 'F12': 123,
+    'Control': null, 'Shift': null, 'Alt': null, 'Meta': null,
+    'CapsLock': 20, 'NumLock': 144, 'Insert': 45, 'Pause': 19,
   };
-  if (map[key] !== undefined) return map[key];
-  if (key.length === 1) { const c = key.toUpperCase().charCodeAt(0); if (c >= 48 && c <= 90) return c; }
-  return null;
+
+  // Ignorar teclas modificadoras solas
+  if (['Control', 'Shift', 'Alt', 'Meta'].includes(key)) return;
+
+  if (specialVK[key] !== undefined) {
+    const vk = specialVK[key];
+    if (vk === null) return;
+
+    if (mods.includes('ctrl')) sendInputCmd('KD 17');
+    if (mods.includes('shift')) sendInputCmd('KD 16');
+    if (mods.includes('alt')) sendInputCmd('KD 18');
+    sendInputCmd(`K ${vk}`);
+    if (mods.includes('alt')) sendInputCmd('KU 18');
+    if (mods.includes('shift')) sendInputCmd('KU 16');
+    if (mods.includes('ctrl')) sendInputCmd('KU 17');
+    return;
+  }
+
+  // Combinaciones con Ctrl/Alt -> usar VK codes
+  if (mods.includes('ctrl') || mods.includes('alt')) {
+    const c = key.toUpperCase().charCodeAt(0);
+    if (c >= 48 && c <= 90) {
+      if (mods.includes('ctrl')) sendInputCmd('KD 17');
+      if (mods.includes('alt')) sendInputCmd('KD 18');
+      sendInputCmd(`K ${c}`);
+      if (mods.includes('alt')) sendInputCmd('KU 18');
+      if (mods.includes('ctrl')) sendInputCmd('KU 17');
+    }
+    return;
+  }
+
+  // Caracteres normales (letras, números, puntos, comas, etc) -> usar SendKeys
+  if (key.length === 1) {
+    // Escapar caracteres especiales de SendKeys: + ^ % ~ { } [ ] ( )
+    let sendKey = key;
+    if (['+', '^', '%', '~', '{', '}', '[', ']', '(', ')'].includes(key)) {
+      sendKey = `{${key}}`;
+    }
+    sendInputCmd(`T ${sendKey}`);
+    return;
+  }
+
+  // Espacio
+  if (key === ' ') {
+    sendInputCmd('K 32');
+  }
 }
 
 // ============================================
