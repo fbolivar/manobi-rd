@@ -271,6 +271,7 @@ while ($true) {
             "KD" { [MI]::KD([byte]$parts[1]) }
             "KU" { [MI]::KU([byte]$parts[1]) }
             "T" { [System.Windows.Forms.SendKeys]::SendWait($parts[1]) }
+            "SP" { [System.Windows.Forms.SendKeys]::SendWait(' ') }
         }
     } catch {}
 }
@@ -375,9 +376,9 @@ function handleKeyboardInput(data) {
     return;
   }
 
-  // Espacio -> VK code directo
+  // Espacio
   if (key === ' ') {
-    sendInputCmd('K 32');
+    sendInputCmd('SP');
     return;
   }
 
