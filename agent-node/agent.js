@@ -119,36 +119,149 @@ function saveToken(token) {
 // ============================================
 // CAPTURA DE PANTALLA
 // ============================================
-let captureAvailable = true;
+let captureFailCount = 0;
+const MAX_CAPTURE_FAILS = 5;
 
 async function captureScreen() {
-  if (!screenshot || !captureAvailable) {
+  // Si falló muchas veces seguidas, usar placeholder
+  if (captureFailCount >= MAX_CAPTURE_FAILS) {
     return await createPlaceholderFrame();
   }
 
-  try {
-    const imgBuffer = await screenshot({ format: 'png' });
+  // Método 1: screenshot-desktop
+  if (screenshot) {
+    try {
+      const imgBuffer = await screenshot({ format: 'png' });
+      captureFailCount = 0; // Resetear contador
 
-    if (sharp) {
-      const metadata = await sharp(imgBuffer).metadata();
-      screenWidth = metadata.width || 1920;
-      screenHeight = metadata.height || 1080;
+      if (sharp) {
+        const metadata = await sharp(imgBuffer).metadata();
+        screenWidth = metadata.width || 1920;
+        screenHeight = metadata.height || 1080;
 
-      const compressed = await sharp(imgBuffer)
-        .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
-        .jpeg({ quality: 40 })
-        .toBuffer();
+        const compressed = await sharp(imgBuffer)
+          .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
+          .jpeg({ quality: 40 })
+          .toBuffer();
 
-      return compressed.toString('base64');
+        return compressed.toString('base64');
+      }
+
+      return imgBuffer.toString('base64');
+    } catch {
+      // Intentar método alternativo
     }
-
-    return imgBuffer.toString('base64');
-  } catch (err) {
-    // Si falla por no tener display, desactivar captura permanentemente
-    console.log('Captura no disponible (sin display grafico). Usando placeholder.');
-    captureAvailable = false;
-    return await createPlaceholderFrame();
   }
+
+  // Método 2: Captura nativa con PowerShell (Windows)
+  if (process.platform === 'win32') {
+    try {
+      const result = await captureWithPowerShell();
+      if (result) {
+        captureFailCount = 0;
+        return result;
+      }
+    } catch {
+      // Caer al placeholder
+    }
+  }
+
+  // Método 3: Captura con import (Linux con display)
+  if (process.platform === 'linux' && process.env.DISPLAY) {
+    try {
+      const result = await captureWithXwd();
+      if (result) {
+        captureFailCount = 0;
+        return result;
+      }
+    } catch {
+      // Caer al placeholder
+    }
+  }
+
+  captureFailCount++;
+  if (captureFailCount === 1) {
+    console.log('Captura directa fallida, intentando metodo alternativo...');
+  }
+  if (captureFailCount >= MAX_CAPTURE_FAILS) {
+    console.log('Captura no disponible. Usando placeholder.');
+  }
+  return await createPlaceholderFrame();
+}
+
+// Captura usando PowerShell nativo (no requiere dependencias extra)
+function captureWithPowerShell() {
+  return new Promise((resolve, reject) => {
+    const tmpFile = path.join(os.tmpdir(), 'manobi-screen.jpg');
+    const psScript = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
+$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
+$graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
+$bitmap.Save('${tmpFile.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
+$graphics.Dispose()
+$bitmap.Dispose()
+Write-Output "$($screen.Width)x$($screen.Height)"
+`;
+
+    const { exec } = require('child_process');
+    exec(`powershell -NoProfile -Command "${psScript.replace(/\n/g, ' ')}"`, { timeout: 5000 }, (err, stdout) => {
+      if (err) return reject(err);
+
+      try {
+        const dims = stdout.trim().split('x');
+        if (dims.length === 2) {
+          screenWidth = parseInt(dims[0]) || 1920;
+          screenHeight = parseInt(dims[1]) || 1080;
+        }
+
+        const imgBuffer = fs.readFileSync(tmpFile);
+        fs.unlinkSync(tmpFile); // Limpiar
+
+        if (sharp) {
+          sharp(imgBuffer)
+            .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 40 })
+            .toBuffer()
+            .then(buf => resolve(buf.toString('base64')))
+            .catch(() => resolve(imgBuffer.toString('base64')));
+        } else {
+          resolve(imgBuffer.toString('base64'));
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
+}
+
+// Captura en Linux usando herramientas del sistema
+function captureWithXwd() {
+  return new Promise((resolve, reject) => {
+    const tmpFile = path.join(os.tmpdir(), 'manobi-screen.png');
+    const { exec } = require('child_process');
+    exec(`import -window root ${tmpFile}`, { timeout: 5000 }, (err) => {
+      if (err) return reject(err);
+      try {
+        const imgBuffer = fs.readFileSync(tmpFile);
+        fs.unlinkSync(tmpFile);
+        if (sharp) {
+          sharp(imgBuffer)
+            .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
+            .jpeg({ quality: 40 })
+            .toBuffer()
+            .then(buf => resolve(buf.toString('base64')))
+            .catch(() => resolve(imgBuffer.toString('base64')));
+        } else {
+          resolve(imgBuffer.toString('base64'));
+        }
+      } catch (e) {
+        reject(e);
+      }
+    });
+  });
 }
 
 async function createPlaceholderFrame() {
