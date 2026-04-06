@@ -119,57 +119,57 @@ function saveToken(token) {
 // ============================================
 // CAPTURA DE PANTALLA
 // ============================================
+let captureAvailable = true;
+
 async function captureScreen() {
-  if (!screenshot) {
-    // Fallback: generar imagen de placeholder
-    return createPlaceholderFrame();
+  if (!screenshot || !captureAvailable) {
+    return await createPlaceholderFrame();
   }
 
   try {
     const imgBuffer = await screenshot({ format: 'png' });
 
     if (sharp) {
-      // Comprimir con sharp a JPEG calidad 40 y redimensionar
+      const metadata = await sharp(imgBuffer).metadata();
+      screenWidth = metadata.width || 1920;
+      screenHeight = metadata.height || 1080;
+
       const compressed = await sharp(imgBuffer)
         .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
         .jpeg({ quality: 40 })
         .toBuffer();
 
-      // Obtener dimensiones
-      const metadata = await sharp(imgBuffer).metadata();
-      screenWidth = metadata.width || 1920;
-      screenHeight = metadata.height || 1080;
-
       return compressed.toString('base64');
     }
 
-    // Sin sharp, enviar PNG directo (más pesado)
     return imgBuffer.toString('base64');
   } catch (err) {
-    console.error('Error capturando pantalla:', err.message);
-    return createPlaceholderFrame();
+    // Si falla por no tener display, desactivar captura permanentemente
+    console.log('Captura no disponible (sin display grafico). Usando placeholder.');
+    captureAvailable = false;
+    return await createPlaceholderFrame();
   }
 }
 
-function createPlaceholderFrame() {
-  // Crear SVG como placeholder cuando no hay captura disponible
+async function createPlaceholderFrame() {
+  const now = new Date().toLocaleTimeString('es-CO');
   const svg = `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
     <rect width="100%" height="100%" fill="#1a1a2e"/>
-    <text x="640" y="340" font-family="Arial" font-size="32" fill="#e0e0e0" text-anchor="middle">
-      Manobi-RD - ${os.hostname()}
-    </text>
-    <text x="640" y="390" font-family="Arial" font-size="20" fill="#888" text-anchor="middle">
-      Captura de pantalla no disponible en este equipo
-    </text>
-    <text x="640" y="430" font-family="Arial" font-size="16" fill="#666" text-anchor="middle">
-      Instale las dependencias de captura para habilitar esta funcion
-    </text>
+    <rect x="340" y="200" width="600" height="320" rx="20" fill="#16213e" stroke="#0f3460" stroke-width="2"/>
+    <text x="640" y="290" font-family="monospace" font-size="36" fill="#e94560" text-anchor="middle" font-weight="bold">Manobi-RD</text>
+    <text x="640" y="340" font-family="monospace" font-size="22" fill="#e0e0e0" text-anchor="middle">${os.hostname()}</text>
+    <text x="640" y="390" font-family="monospace" font-size="16" fill="#888" text-anchor="middle">Equipo conectado - Sin display grafico</text>
+    <text x="640" y="420" font-family="monospace" font-size="14" fill="#666" text-anchor="middle">IP: ${getSystemInfo().direccion_ip} | ${now}</text>
+    <text x="640" y="470" font-family="monospace" font-size="13" fill="#555" text-anchor="middle">Instale el agente en un equipo con escritorio para ver la pantalla</text>
   </svg>`;
 
   if (sharp) {
-    return sharp(Buffer.from(svg)).jpeg({ quality: 50 }).toBuffer()
-      .then(buf => buf.toString('base64'))
-      .catch(() => Buffer.from(svg).toString('base64'));
+    try {
+      const buf = await sharp(Buffer.from(svg)).jpeg({ quality: 60 }).toBuffer();
+      return buf.toString('base64');
+    } catch {
+      return Buffer.from(svg).toString('base64');
+    }
   }
   return Buffer.from(svg).toString('base64');
 }
