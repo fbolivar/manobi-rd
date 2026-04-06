@@ -1,7 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { InjectRepository } from '@nestjs/typeorm';
 import { Repository, ILike } from 'typeorm';
-import { v4 as uuidv4 } from 'uuid';
+import { randomUUID } from 'crypto';
 import { Dispositivo } from './dispositivo.entity';
 import { RegisterDeviceDto, UpdateDeviceDto } from './devices.dto';
 
@@ -55,7 +55,7 @@ export class DevicesService {
 
     const device = this.repo.create({
       ...dto,
-      token_agente: `manobi-${uuidv4()}`,
+      token_agente: `manobi-${randomUUID()}`,
       estado: 'conectado',
       ultima_conexion: new Date(),
     });
