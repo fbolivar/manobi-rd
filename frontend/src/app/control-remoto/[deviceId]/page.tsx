@@ -166,56 +166,20 @@ export default function ControlRemotoPage() {
   // ==========================================
   // MOUSE - Solo enviar clics, NO movimiento
   // ==========================================
-  const handleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    console.log('CLICK detectado', { connected, inputEnabled, hasCanvas: !!canvasRef.current });
-    if (!connected || !inputEnabled || !canvasRef.current) return;
-
+  function sendMouseEvent(e: React.MouseEvent<HTMLCanvasElement>, type: string) {
+    if (!canvasRef.current) return;
     const rect = canvasRef.current.getBoundingClientRect();
     const x = (e.clientX - rect.left) / rect.width;
     const y = (e.clientY - rect.top) / rect.height;
 
-    const payload = {
+    socketRef.current.emit('input:mouse', {
       deviceId,
       x: Math.max(0, Math.min(1, x)),
       y: Math.max(0, Math.min(1, y)),
-      type: 'click',
+      type,
       button: e.button,
-    };
-    console.log('Enviando input:mouse', payload);
-    socketRef.current.emit('input:mouse', payload);
-  }, [connected, inputEnabled, deviceId]);
-
-  const handleDoubleClick = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!connected || !inputEnabled || !canvasRef.current) return;
-    e.preventDefault();
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-
-    socketRef.current.emit('input:mouse', {
-      deviceId,
-      x: Math.max(0, Math.min(1, x)),
-      y: Math.max(0, Math.min(1, y)),
-      type: 'dblclick',
-      button: 0,
     });
-  }, [connected, inputEnabled, deviceId]);
-
-  const handleContextMenu = useCallback((e: React.MouseEvent<HTMLCanvasElement>) => {
-    if (!connected || !inputEnabled || !canvasRef.current) return;
-    e.preventDefault();
-    const rect = canvasRef.current.getBoundingClientRect();
-    const x = (e.clientX - rect.left) / rect.width;
-    const y = (e.clientY - rect.top) / rect.height;
-
-    socketRef.current.emit('input:mouse', {
-      deviceId,
-      x: Math.max(0, Math.min(1, x)),
-      y: Math.max(0, Math.min(1, y)),
-      type: 'contextmenu',
-      button: 2,
-    });
-  }, [connected, inputEnabled, deviceId]);
+  }
 
   // ==========================================
   // TECLADO
@@ -440,9 +404,9 @@ export default function ControlRemotoPage() {
               height={720}
               className={`max-w-full max-h-full object-contain ${inputEnabled ? 'cursor-crosshair' : 'cursor-default'}`}
               tabIndex={0}
-              onClick={(e) => { canvasRef.current?.focus(); handleClick(e); }}
-              onDoubleClick={handleDoubleClick}
-              onContextMenu={handleContextMenu}
+              onClick={(e) => { canvasRef.current?.focus(); if (inputEnabled) sendMouseEvent(e, 'click'); }}
+              onDoubleClick={(e) => { if (inputEnabled) sendMouseEvent(e, 'dblclick'); }}
+              onContextMenu={(e) => { e.preventDefault(); if (inputEnabled) sendMouseEvent(e, 'contextmenu'); }}
             />
           ) : (
             <div className="text-center">
