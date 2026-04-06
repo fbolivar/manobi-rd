@@ -113,68 +113,69 @@ function showAuthorizationPopup() {
 // ============================================
 // CHAT - Ventana en equipo del cliente
 // ============================================
-let chatProcess = null;
-const chatInbox = path.join(os.tmpdir(), 'manobi-chat-inbox.txt');
-const chatOutbox = path.join(os.tmpdir(), 'manobi-chat-outbox.txt');
-let chatPollInterval = null;
+let chatServer = null;
+let chatMessages = []; // Cola de mensajes del soporte para enviar al browser
+let chatSocket = null;
+let chatSessionId = null;
 
 function startChatWindow(socket, sessionId) {
-  if (process.platform !== 'win32') return;
-  if (chatProcess) { try { chatProcess.kill(); } catch {} }
+  chatSocket = socket;
+  chatSessionId = sessionId;
+  chatMessages = [];
 
-  const chatScript = path.join(__dirname, 'chat-window.ps1');
-  if (!fs.existsSync(chatScript)) {
-    console.log('⚠️ chat-window.ps1 no encontrado');
-    return;
-  }
+  const http = require('http');
+  const chatHtml = path.join(__dirname, 'chat.html');
 
-  // Limpiar archivos de comunicación
-  try { fs.writeFileSync(chatInbox, ''); } catch {}
-  try { fs.writeFileSync(chatOutbox, ''); } catch {}
+  if (chatServer) { try { chatServer.close(); } catch {} }
 
-  chatProcess = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', chatScript], {
-    stdio: 'ignore',
-    detached: true,
-  });
-  chatProcess.unref();
-  chatProcess.on('exit', () => { chatProcess = null; });
-
-  // Leer mensajes del usuario via archivo outbox
-  chatPollInterval = setInterval(() => {
-    try {
-      const content = fs.readFileSync(chatOutbox, 'utf8').trim();
-      if (!content) return;
-      fs.writeFileSync(chatOutbox, '');
-
-      const lines = content.split('\n');
-      for (const line of lines) {
-        const msg = line.trim();
-        if (!msg) continue;
-        if (msg === 'CHAT_CLOSED') {
-          console.log('💬 Usuario cerró el chat');
-          continue;
+  chatServer = http.createServer((req, res) => {
+    if (req.url === '/messages') {
+      // Enviar mensajes pendientes al browser
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ messages: chatMessages.splice(0) }));
+    } else if (req.url === '/send' && req.method === 'POST') {
+      // Recibir mensaje del usuario
+      let body = '';
+      req.on('data', chunk => body += chunk);
+      req.on('end', () => {
+        const msg = body.trim();
+        if (msg && chatSocket && chatSessionId) {
+          console.log(`💬 Usuario dice: ${msg}`);
+          chatSocket.emit('chat:mensaje', { sessionId: chatSessionId, contenido: `[Usuario] ${msg}` });
         }
-        console.log(`💬 Usuario dice: ${msg}`);
-        socket.emit('chat:mensaje', { sessionId, contenido: `[Usuario] ${msg}` });
-      }
-    } catch {}
-  }, 500);
+        res.writeHead(200, { 'Access-Control-Allow-Origin': '*' });
+        res.end('ok');
+      });
+    } else if (req.url === '/') {
+      // Servir el HTML del chat
+      res.writeHead(200, { 'Content-Type': 'text/html; charset=utf-8' });
+      res.end(fs.readFileSync(chatHtml, 'utf8'));
+    } else {
+      res.writeHead(404);
+      res.end();
+    }
+  });
 
-  console.log('💬 Ventana de chat abierta');
+  chatServer.listen(19876, '127.0.0.1', () => {
+    console.log('💬 Chat server en http://localhost:19876');
+    // Abrir en el navegador del usuario
+    exec('start http://localhost:19876', () => {});
+  });
+
+  chatServer.on('error', (err) => {
+    console.log('⚠️ Chat server error:', err.message);
+  });
 }
 
 function sendChatMessage(mensaje) {
-  try {
-    fs.appendFileSync(chatInbox, mensaje + '\n');
-  } catch {}
+  chatMessages.push(mensaje);
 }
 
 function closeChatWindow() {
-  if (chatPollInterval) { clearInterval(chatPollInterval); chatPollInterval = null; }
-  try { fs.writeFileSync(chatInbox, 'CLOSE\n'); } catch {}
+  chatMessages.push('__CLOSE__');
   setTimeout(() => {
-    if (chatProcess) { try { chatProcess.kill(); } catch {} chatProcess = null; }
-  }, 4000);
+    if (chatServer) { try { chatServer.close(); } catch {} chatServer = null; }
+  }, 3000);
 }
 
 // ============================================
