@@ -29,6 +29,7 @@ export default function ControlRemotoPage() {
   const [rightPanel, setRightPanel] = useState<'none' | 'chat' | 'files'>('none');
   const [fullscreen, setFullscreen] = useState(false);
   const [inputEnabled, setInputEnabled] = useState(true);
+  const [waitingAuth, setWaitingAuth] = useState(false);
 
   // Archivos
   const [files, setFiles] = useState<FileItem[]>([]);
@@ -89,19 +90,36 @@ export default function ControlRemotoPage() {
     socket.on('control:sesion-creada', (data: { sessionId: string }) => {
       setSessionId(data.sessionId);
       sessionIdRef.current = data.sessionId;
-      setConnected(true);
+      setWaitingAuth(true);
 
       socket.on(`chat:${data.sessionId}`, (msg: Mensaje) => {
         setMensajes((prev) => [...prev, msg]);
       });
     });
 
+    // Usuario autorizó
+    socket.on('control:autorizado', () => {
+      setWaitingAuth(false);
+      setConnected(true);
+    });
+
+    // Usuario rechazó
+    socket.on('control:rechazado', (data: { message: string }) => {
+      setWaitingAuth(false);
+      setConnected(false);
+      setSessionId(null);
+      sessionIdRef.current = null;
+      alert(data.message);
+    });
+
     socket.on('control:error', (data: { message: string }) => {
+      setWaitingAuth(false);
       alert(data.message);
     });
 
     socket.on('control:finalizado', () => {
       setConnected(false);
+      setWaitingAuth(false);
       setSessionId(null);
       sessionIdRef.current = null;
     });
@@ -349,7 +367,11 @@ export default function ControlRemotoPage() {
         </div>
 
         <div className="flex items-center gap-2">
-          {!connected ? (
+          {waitingAuth ? (
+            <span className="text-amber-400 text-sm animate-pulse">
+              Esperando autorizacion del usuario...
+            </span>
+          ) : !connected ? (
             <button onClick={startSession} className="btn-primary text-sm">
               Iniciar Control Remoto
             </button>
@@ -402,7 +424,13 @@ export default function ControlRemotoPage() {
 
         {/* CANVAS - Pantalla remota */}
         <div className="flex-1 bg-black flex items-center justify-center relative">
-          {connected ? (
+          {waitingAuth ? (
+            <div className="text-center">
+              <div className="w-16 h-16 border-4 border-manobi-500 border-t-transparent rounded-full animate-spin mx-auto mb-4"></div>
+              <p className="text-amber-400 text-lg">Esperando autorizacion del usuario...</p>
+              <p className="text-gray-500 text-sm mt-2">El usuario debe aceptar la solicitud de control remoto</p>
+            </div>
+          ) : connected ? (
             <canvas
               ref={canvasRef}
               width={1280}

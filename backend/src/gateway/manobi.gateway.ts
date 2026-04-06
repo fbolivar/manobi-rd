@@ -180,8 +180,35 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
       userId: client.userId,
     });
 
-    client.emit('control:sesion-creada', { sessionId: session.id });
-    console.log(`📺 Sesión iniciada: ${session.id} (${data.deviceId})`);
+    client.emit('control:sesion-creada', { sessionId: session.id, esperandoAutorizacion: true });
+    console.log(`📺 Sesión creada: ${session.id} - esperando autorización del usuario`);
+  }
+
+  // Respuesta de autorización del usuario remoto
+  @SubscribeMessage('control:autorizado')
+  async handleAuthorization(
+    @ConnectedSocket() client: AgentSocket,
+    @MessageBody() data: { sessionId: string; autorizado: boolean },
+  ) {
+    const viewerUserId = this.sessionViewers.get(data.sessionId);
+    if (!viewerUserId) return;
+
+    const viewerSocketId = this.userSockets.get(viewerUserId);
+    if (!viewerSocketId) return;
+
+    if (data.autorizado) {
+      this.server.to(viewerSocketId).emit('control:autorizado', { sessionId: data.sessionId, autorizado: true });
+      console.log(`✅ Usuario autorizó sesión ${data.sessionId}`);
+    } else {
+      // Rechazado: cerrar sesión
+      await this.sessionsService.end(data.sessionId);
+      this.sessionViewers.delete(data.sessionId);
+      for (const [deviceId, sid] of this.activeSessionsByDevice.entries()) {
+        if (sid === data.sessionId) { this.activeSessionsByDevice.delete(deviceId); break; }
+      }
+      this.server.to(viewerSocketId).emit('control:rechazado', { sessionId: data.sessionId, message: 'El usuario rechazó la conexión remota' });
+      console.log(`❌ Usuario rechazó sesión ${data.sessionId}`);
+    }
   }
 
   // ==========================================
@@ -239,7 +266,22 @@ export class ManobiGateway implements OnGatewayConnection, OnGatewayDisconnect, 
   ) {
     const remitente = client.deviceId ? 'usuario' : 'agente';
     const msg = await this.chatService.create(data.sessionId, remitente, data.contenido);
+
+    // Enviar al panel web
     this.server.emit(`chat:${data.sessionId}`, msg);
+
+    // Si es mensaje del agente de soporte, reenviarlo al dispositivo remoto como notificación
+    if (remitente === 'agente') {
+      for (const [deviceId, sid] of this.activeSessionsByDevice.entries()) {
+        if (sid === data.sessionId) {
+          const agentSocketId = this.agentSockets.get(deviceId);
+          if (agentSocketId) {
+            this.server.to(agentSocketId).emit('chat:recibido', { contenido: data.contenido });
+          }
+          break;
+        }
+      }
+    }
   }
 
   // ==========================================

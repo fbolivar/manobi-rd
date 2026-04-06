@@ -2,14 +2,13 @@ const { io } = require('socket.io-client');
 const os = require('os');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { exec, spawn } = require('child_process');
 
 // ============================================
 // Manobi-RD Agente v1.0
 // BC Fabric SAS - Colombia
 // ============================================
 
-// Módulos opcionales (captura + input)
 let screenshot, sharp, robot;
 try { screenshot = require('screenshot-desktop'); } catch { screenshot = null; }
 try { sharp = require('sharp'); } catch { sharp = null; }
@@ -19,12 +18,12 @@ const CONFIG_PATH = process.platform === 'win32'
   ? 'C:\\ProgramData\\ManobiRD\\config.json'
   : '/etc/manobi-rd/config.json';
 
-// Estado de streaming
 let isStreaming = false;
 let streamingInterval = null;
 let currentSessionId = null;
 let screenWidth = 1920;
 let screenHeight = 1080;
+let psProcess = null; // Proceso PowerShell persistente para input
 
 function loadConfig() {
   try {
@@ -40,9 +39,7 @@ function getSystemInfo() {
   const hostname = os.hostname();
   const platform = os.platform();
   const interfaces = os.networkInterfaces();
-
-  let ip = '';
-  let mac = '';
+  let ip = '', mac = '';
   for (const [name, addrs] of Object.entries(interfaces)) {
     if (name === 'lo' || name === 'lo0') continue;
     for (const addr of addrs) {
@@ -52,68 +49,145 @@ function getSystemInfo() {
       }
     }
   }
-
-  let sistemaOp = 'linux';
-  let versionSO = '';
+  let sistemaOp = 'linux', versionSO = '';
   if (platform === 'win32') {
     sistemaOp = 'windows';
-    try {
-      versionSO = execSync('wmic os get Caption /value', { encoding: 'utf8' })
-        .split('=')[1]?.trim() || 'Windows';
-    } catch {
-      versionSO = `Windows ${os.release()}`;
-    }
+    try { versionSO = require('child_process').execSync('wmic os get Caption /value', { encoding: 'utf8' }).split('=')[1]?.trim() || 'Windows'; } catch { versionSO = `Windows ${os.release()}`; }
   } else {
-    try {
-      const release = fs.readFileSync('/etc/os-release', 'utf8');
-      const match = release.match(/PRETTY_NAME="(.+)"/);
-      versionSO = match ? match[1] : `Linux ${os.release()}`;
-    } catch {
-      versionSO = `Linux ${os.release()}`;
-    }
+    try { const r = fs.readFileSync('/etc/os-release', 'utf8'); const m = r.match(/PRETTY_NAME="(.+)"/); versionSO = m ? m[1] : `Linux ${os.release()}`; } catch { versionSO = `Linux ${os.release()}`; }
   }
-
-  let enDominio = false;
-  let nombreDominio = '';
+  let enDominio = false, nombreDominio = '';
   if (platform === 'win32') {
-    const domain = process.env.USERDOMAIN || '';
-    const computer = process.env.COMPUTERNAME || '';
-    if (domain && domain !== computer) {
-      enDominio = true;
-      nombreDominio = domain;
-    }
+    const domain = process.env.USERDOMAIN || '', computer = process.env.COMPUTERNAME || '';
+    if (domain && domain !== computer) { enDominio = true; nombreDominio = domain; }
   }
-
-  const usuario = os.userInfo().username;
-  const cpus = os.cpus();
-  const cpuInfo = cpus.length > 0 ? `${cpus[0].model} (${cpus.length} cores)` : 'Desconocido';
-  const ramMB = Math.round(os.totalmem() / 1024 / 1024);
-
   return {
-    nombre: hostname,
-    hostname,
-    direccion_ip: ip,
-    direccion_mac: mac !== '00:00:00:00:00:00' ? mac : '',
-    sistema_operativo: sistemaOp,
-    version_so: versionSO,
-    en_dominio: enDominio,
-    nombre_dominio: nombreDominio,
-    usuario_actual: usuario,
-    cpu_info: cpuInfo,
-    ram_total_mb: ramMB,
+    nombre: hostname, hostname,
+    direccion_ip: ip, direccion_mac: mac !== '00:00:00:00:00:00' ? mac : '',
+    sistema_operativo: sistemaOp, version_so: versionSO,
+    en_dominio: enDominio, nombre_dominio: nombreDominio,
+    usuario_actual: os.userInfo().username,
+    cpu_info: os.cpus().length > 0 ? `${os.cpus()[0].model} (${os.cpus().length} cores)` : 'Desconocido',
+    ram_total_mb: Math.round(os.totalmem() / 1024 / 1024),
   };
 }
 
 function saveToken(token) {
   const config = loadConfig();
   config.token = token;
-  const dir = path.dirname(CONFIG_PATH);
-  try {
-    fs.mkdirSync(dir, { recursive: true });
-    fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2));
-  } catch (err) {
-    console.log('No se pudo guardar token:', err.message);
-  }
+  try { fs.mkdirSync(path.dirname(CONFIG_PATH), { recursive: true }); fs.writeFileSync(CONFIG_PATH, JSON.stringify(config, null, 2)); } catch {}
+}
+
+// ============================================
+// POPUP DE AUTORIZACIÓN (Windows)
+// ============================================
+function showAuthorizationPopup() {
+  return new Promise((resolve) => {
+    if (process.platform !== 'win32') { resolve(true); return; }
+
+    const psCmd = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+
+$form = New-Object System.Windows.Forms.Form
+$form.Text = 'Manobi-RD - Mesa de Servicios'
+$form.Size = New-Object System.Drawing.Size(520, 320)
+$form.StartPosition = 'CenterScreen'
+$form.FormBorderStyle = 'FixedDialog'
+$form.MaximizeBox = $false
+$form.MinimizeBox = $false
+$form.TopMost = $true
+$form.BackColor = [System.Drawing.Color]::FromArgb(26, 26, 46)
+$form.ForeColor = [System.Drawing.Color]::White
+
+$logo = New-Object System.Windows.Forms.Label
+$logo.Text = 'Manobi-RD'
+$logo.Font = New-Object System.Drawing.Font('Segoe UI', 18, [System.Drawing.FontStyle]::Bold)
+$logo.ForeColor = [System.Drawing.Color]::FromArgb(51, 141, 255)
+$logo.AutoSize = $true
+$logo.Location = New-Object System.Drawing.Point(30, 20)
+$form.Controls.Add($logo)
+
+$subtitle = New-Object System.Windows.Forms.Label
+$subtitle.Text = 'Mesa de Servicios - Parques Nacionales Naturales de Colombia'
+$subtitle.Font = New-Object System.Drawing.Font('Segoe UI', 9)
+$subtitle.ForeColor = [System.Drawing.Color]::FromArgb(150, 150, 150)
+$subtitle.AutoSize = $true
+$subtitle.Location = New-Object System.Drawing.Point(30, 55)
+$form.Controls.Add($subtitle)
+
+$msg = New-Object System.Windows.Forms.Label
+$msg.Text = "Bienvenido a la Mesa de Servicios de Parques Nacionales Naturales de Colombia.
+
+Vamos a tomar control remoto de su maquina para ayudarle en lo que necesite.
+
+Usted autoriza esta conexion?"
+$msg.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$msg.ForeColor = [System.Drawing.Color]::FromArgb(220, 220, 220)
+$msg.Size = New-Object System.Drawing.Size(450, 100)
+$msg.Location = New-Object System.Drawing.Point(30, 90)
+$form.Controls.Add($msg)
+
+$btnSi = New-Object System.Windows.Forms.Button
+$btnSi.Text = 'Si, Autorizo'
+$btnSi.Size = New-Object System.Drawing.Size(150, 40)
+$btnSi.Location = New-Object System.Drawing.Point(160, 220)
+$btnSi.BackColor = [System.Drawing.Color]::FromArgb(20, 87, 225)
+$btnSi.ForeColor = [System.Drawing.Color]::White
+$btnSi.FlatStyle = 'Flat'
+$btnSi.Font = New-Object System.Drawing.Font('Segoe UI', 10, [System.Drawing.FontStyle]::Bold)
+$btnSi.DialogResult = [System.Windows.Forms.DialogResult]::Yes
+$form.Controls.Add($btnSi)
+
+$btnNo = New-Object System.Windows.Forms.Button
+$btnNo.Text = 'No, Rechazar'
+$btnNo.Size = New-Object System.Drawing.Size(150, 40)
+$btnNo.Location = New-Object System.Drawing.Point(320, 220)
+$btnNo.BackColor = [System.Drawing.Color]::FromArgb(80, 80, 80)
+$btnNo.ForeColor = [System.Drawing.Color]::White
+$btnNo.FlatStyle = 'Flat'
+$btnNo.Font = New-Object System.Drawing.Font('Segoe UI', 10)
+$btnNo.DialogResult = [System.Windows.Forms.DialogResult]::No
+$form.Controls.Add($btnNo)
+
+$form.AcceptButton = $btnSi
+$form.CancelButton = $btnNo
+
+$result = $form.ShowDialog()
+if ($result -eq [System.Windows.Forms.DialogResult]::Yes) { Write-Output 'AUTORIZADO' } else { Write-Output 'RECHAZADO' }
+`;
+
+    exec(`powershell -NoProfile -ExecutionPolicy Bypass -Command "${psCmd.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
+      { timeout: 60000 },
+      (err, stdout) => {
+        if (err) { resolve(false); return; }
+        resolve(stdout.trim().includes('AUTORIZADO'));
+      }
+    );
+  });
+}
+
+// ============================================
+// CHAT - Mostrar mensaje en equipo remoto
+// ============================================
+function showChatNotification(mensaje) {
+  if (process.platform !== 'win32') return;
+
+  const psCmd = `
+Add-Type -AssemblyName System.Windows.Forms
+$n = New-Object System.Windows.Forms.NotifyIcon
+$n.Icon = [System.Drawing.SystemIcons]::Information
+$n.Visible = $true
+$n.BalloonTipTitle = 'Mesa de Servicios - Manobi-RD'
+$n.BalloonTipText = '${mensaje.replace(/'/g, "''").replace(/\n/g, ' ')}'
+$n.BalloonTipIcon = 'Info'
+$n.ShowBalloonTip(10000)
+Start-Sleep -Seconds 10
+$n.Dispose()
+`;
+
+  exec(`powershell -NoProfile -WindowStyle Hidden -Command "${psCmd.replace(/"/g, '\\"').replace(/\n/g, ' ')}"`,
+    { timeout: 15000 }, () => {});
 }
 
 // ============================================
@@ -123,436 +197,239 @@ let captureFailCount = 0;
 const MAX_CAPTURE_FAILS = 5;
 
 async function captureScreen() {
-  // Si falló muchas veces seguidas, usar placeholder
-  if (captureFailCount >= MAX_CAPTURE_FAILS) {
-    return await createPlaceholderFrame();
-  }
+  if (captureFailCount >= MAX_CAPTURE_FAILS) return await createPlaceholderFrame();
 
-  // Método 1: screenshot-desktop
   if (screenshot) {
     try {
       const imgBuffer = await screenshot({ format: 'png' });
-      captureFailCount = 0; // Resetear contador
-
+      captureFailCount = 0;
       if (sharp) {
         const metadata = await sharp(imgBuffer).metadata();
         screenWidth = metadata.width || 1920;
         screenHeight = metadata.height || 1080;
-
         const compressed = await sharp(imgBuffer)
           .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
           .jpeg({ quality: 40 })
           .toBuffer();
-
         return compressed.toString('base64');
       }
-
       return imgBuffer.toString('base64');
-    } catch {
-      // Intentar método alternativo
-    }
+    } catch {}
   }
 
-  // Método 2: Captura nativa con PowerShell (Windows)
   if (process.platform === 'win32') {
     try {
       const result = await captureWithPowerShell();
-      if (result) {
-        captureFailCount = 0;
-        return result;
-      }
-    } catch {
-      // Caer al placeholder
-    }
-  }
-
-  // Método 3: Captura con import (Linux con display)
-  if (process.platform === 'linux' && process.env.DISPLAY) {
-    try {
-      const result = await captureWithXwd();
-      if (result) {
-        captureFailCount = 0;
-        return result;
-      }
-    } catch {
-      // Caer al placeholder
-    }
+      if (result) { captureFailCount = 0; return result; }
+    } catch {}
   }
 
   captureFailCount++;
-  if (captureFailCount === 1) {
-    console.log('Captura directa fallida, intentando metodo alternativo...');
-  }
-  if (captureFailCount >= MAX_CAPTURE_FAILS) {
-    console.log('Captura no disponible. Usando placeholder.');
-  }
+  if (captureFailCount >= MAX_CAPTURE_FAILS) console.log('Captura no disponible. Usando placeholder.');
   return await createPlaceholderFrame();
 }
 
-// Captura usando PowerShell nativo (no requiere dependencias extra)
 function captureWithPowerShell() {
   return new Promise((resolve, reject) => {
     const tmpFile = path.join(os.tmpdir(), 'manobi-screen.jpg');
-    const psScript = `
-Add-Type -AssemblyName System.Windows.Forms
-Add-Type -AssemblyName System.Drawing
-$screen = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
-$bitmap = New-Object System.Drawing.Bitmap($screen.Width, $screen.Height)
-$graphics = [System.Drawing.Graphics]::FromImage($bitmap)
-$graphics.CopyFromScreen($screen.Location, [System.Drawing.Point]::Empty, $screen.Size)
-$bitmap.Save('${tmpFile.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Jpeg)
-$graphics.Dispose()
-$bitmap.Dispose()
-Write-Output "$($screen.Width)x$($screen.Height)"
-`;
+    const psScript = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $b=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $b.Save('${tmpFile.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Jpeg); $g.Dispose(); $b.Dispose(); Write-Output "$($s.Width)x$($s.Height)"`;
 
-    const { exec } = require('child_process');
-    exec(`powershell -NoProfile -Command "${psScript.replace(/\n/g, ' ')}"`, { timeout: 5000 }, (err, stdout) => {
+    exec(`powershell -NoProfile -Command "${psScript}"`, { timeout: 5000 }, (err, stdout) => {
       if (err) return reject(err);
-
       try {
         const dims = stdout.trim().split('x');
-        if (dims.length === 2) {
-          screenWidth = parseInt(dims[0]) || 1920;
-          screenHeight = parseInt(dims[1]) || 1080;
-        }
-
+        if (dims.length === 2) { screenWidth = parseInt(dims[0]) || 1920; screenHeight = parseInt(dims[1]) || 1080; }
         const imgBuffer = fs.readFileSync(tmpFile);
-        fs.unlinkSync(tmpFile); // Limpiar
-
+        try { fs.unlinkSync(tmpFile); } catch {}
         if (sharp) {
-          sharp(imgBuffer)
-            .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
-            .jpeg({ quality: 40 })
-            .toBuffer()
-            .then(buf => resolve(buf.toString('base64')))
-            .catch(() => resolve(imgBuffer.toString('base64')));
-        } else {
-          resolve(imgBuffer.toString('base64'));
-        }
-      } catch (e) {
-        reject(e);
-      }
-    });
-  });
-}
-
-// Captura en Linux usando herramientas del sistema
-function captureWithXwd() {
-  return new Promise((resolve, reject) => {
-    const tmpFile = path.join(os.tmpdir(), 'manobi-screen.png');
-    const { exec } = require('child_process');
-    exec(`import -window root ${tmpFile}`, { timeout: 5000 }, (err) => {
-      if (err) return reject(err);
-      try {
-        const imgBuffer = fs.readFileSync(tmpFile);
-        fs.unlinkSync(tmpFile);
-        if (sharp) {
-          sharp(imgBuffer)
-            .resize(1280, 720, { fit: 'inside', withoutEnlargement: true })
-            .jpeg({ quality: 40 })
-            .toBuffer()
-            .then(buf => resolve(buf.toString('base64')))
-            .catch(() => resolve(imgBuffer.toString('base64')));
-        } else {
-          resolve(imgBuffer.toString('base64'));
-        }
-      } catch (e) {
-        reject(e);
-      }
+          sharp(imgBuffer).resize(1280, 720, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 40 }).toBuffer()
+            .then(buf => resolve(buf.toString('base64'))).catch(() => resolve(imgBuffer.toString('base64')));
+        } else { resolve(imgBuffer.toString('base64')); }
+      } catch (e) { reject(e); }
     });
   });
 }
 
 async function createPlaceholderFrame() {
-  const now = new Date().toLocaleTimeString('es-CO');
-  const svg = `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg">
-    <rect width="100%" height="100%" fill="#1a1a2e"/>
-    <rect x="340" y="200" width="600" height="320" rx="20" fill="#16213e" stroke="#0f3460" stroke-width="2"/>
-    <text x="640" y="290" font-family="monospace" font-size="36" fill="#e94560" text-anchor="middle" font-weight="bold">Manobi-RD</text>
-    <text x="640" y="340" font-family="monospace" font-size="22" fill="#e0e0e0" text-anchor="middle">${os.hostname()}</text>
-    <text x="640" y="390" font-family="monospace" font-size="16" fill="#888" text-anchor="middle">Equipo conectado - Sin display grafico</text>
-    <text x="640" y="420" font-family="monospace" font-size="14" fill="#666" text-anchor="middle">IP: ${getSystemInfo().direccion_ip} | ${now}</text>
-    <text x="640" y="470" font-family="monospace" font-size="13" fill="#555" text-anchor="middle">Instale el agente en un equipo con escritorio para ver la pantalla</text>
-  </svg>`;
-
-  if (sharp) {
-    try {
-      const buf = await sharp(Buffer.from(svg)).jpeg({ quality: 60 }).toBuffer();
-      return buf.toString('base64');
-    } catch {
-      return Buffer.from(svg).toString('base64');
-    }
-  }
+  const svg = `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#1a1a2e"/><text x="640" y="340" font-family="monospace" font-size="28" fill="#e94560" text-anchor="middle">Manobi-RD - ${os.hostname()}</text><text x="640" y="380" font-family="monospace" font-size="16" fill="#888" text-anchor="middle">Sin display grafico disponible</text></svg>`;
+  if (sharp) { try { return (await sharp(Buffer.from(svg)).jpeg({ quality: 60 }).toBuffer()).toString('base64'); } catch {} }
   return Buffer.from(svg).toString('base64');
 }
 
 let lastFrameHash = '';
-
 function simpleHash(str) {
   let hash = 0;
-  // Solo comparar primeros 500 chars para velocidad
   const sample = str.substring(0, 500) + str.substring(str.length - 500);
-  for (let i = 0; i < sample.length; i++) {
-    const char = sample.charCodeAt(i);
-    hash = ((hash << 5) - hash) + char;
-    hash = hash & hash;
-  }
+  for (let i = 0; i < sample.length; i++) { hash = ((hash << 5) - hash) + sample.charCodeAt(i); hash = hash & hash; }
   return hash.toString();
 }
 
 function startStreaming(socket, sessionId) {
-  if (isStreaming) return;
+  if (isStreaming) stopStreaming();
   isStreaming = true;
   currentSessionId = sessionId;
   lastFrameHash = '';
-  console.log(`📺 Iniciando streaming para sesión ${sessionId}`);
+  console.log(`📺 Streaming iniciado: ${sessionId}`);
 
-  // Capturar y enviar frames a ~8 FPS
   streamingInterval = setInterval(async () => {
     try {
       const frame = await captureScreen();
-
-      // Solo enviar si el frame cambió (delta)
       const hash = simpleHash(frame);
       if (hash === lastFrameHash) return;
       lastFrameHash = hash;
-
-      socket.volatile.emit('screen:frame', {
-        sessionId,
-        frame,
-        width: screenWidth,
-        height: screenHeight,
-        timestamp: Date.now(),
-      });
-    } catch (err) {
-      console.error('Error en streaming:', err.message);
-    }
-  }, 125); // ~8 FPS
+      socket.volatile.emit('screen:frame', { sessionId, frame, width: screenWidth, height: screenHeight, timestamp: Date.now() });
+    } catch {}
+  }, 150); // ~7 FPS
 }
 
 function stopStreaming() {
-  if (streamingInterval) {
-    clearInterval(streamingInterval);
-    streamingInterval = null;
-  }
+  if (streamingInterval) { clearInterval(streamingInterval); streamingInterval = null; }
   isStreaming = false;
   currentSessionId = null;
   console.log('📺 Streaming detenido');
 }
 
 // ============================================
-// CONTROL DE INPUT (mouse + teclado) - Nativo
+// CONTROL DE INPUT - PowerShell persistente
 // ============================================
-const { exec } = require('child_process');
+function initInputSystem() {
+  if (process.platform !== 'win32') return false;
 
-// Inyectar helper de C# para input en Windows (se compila una sola vez)
-let inputHelperReady = false;
-const inputHelperPath = path.join(os.tmpdir(), 'manobi-input.ps1');
-
-function initInputHelper() {
-  if (process.platform !== 'win32') return;
-
-  const helperScript = `
+  try {
+    // Crear script PowerShell que se queda escuchando comandos via stdin
+    const scriptContent = `
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
-public class ManobiInput {
+public class MI {
     [DllImport("user32.dll")] public static extern bool SetCursorPos(int X, int Y);
-    [DllImport("user32.dll")] public static extern void mouse_event(uint dwFlags, int dx, int dy, uint dwData, int dwExtraInfo);
-    [DllImport("user32.dll")] public static extern void keybd_event(byte bVk, byte bScan, uint dwFlags, int dwExtraInfo);
-
-    public static void MoveTo(int x, int y) { SetCursorPos(x, y); }
-    public static void LeftClick(int x, int y) {
-        SetCursorPos(x, y);
-        mouse_event(0x0002, 0, 0, 0, 0); // LEFTDOWN
-        mouse_event(0x0004, 0, 0, 0, 0); // LEFTUP
-    }
-    public static void RightClick(int x, int y) {
-        SetCursorPos(x, y);
-        mouse_event(0x0008, 0, 0, 0, 0); // RIGHTDOWN
-        mouse_event(0x0010, 0, 0, 0, 0); // RIGHTUP
-    }
-    public static void DoubleClick(int x, int y) {
-        SetCursorPos(x, y);
-        mouse_event(0x0002, 0, 0, 0, 0);
-        mouse_event(0x0004, 0, 0, 0, 0);
-        mouse_event(0x0002, 0, 0, 0, 0);
-        mouse_event(0x0004, 0, 0, 0, 0);
-    }
-    public static void KeyPress(byte vk) {
-        keybd_event(vk, 0, 0, 0);
-        keybd_event(vk, 0, 0x0002, 0); // KEYUP
-    }
-    public static void KeyDown(byte vk) { keybd_event(vk, 0, 0, 0); }
-    public static void KeyUp(byte vk) { keybd_event(vk, 0, 0x0002, 0); }
+    [DllImport("user32.dll")] public static extern void mouse_event(uint f, int dx, int dy, uint d, int e);
+    [DllImport("user32.dll")] public static extern void keybd_event(byte vk, byte s, uint f, int e);
+    public static void Click(int x, int y) { SetCursorPos(x, y); mouse_event(2,0,0,0,0); mouse_event(4,0,0,0,0); }
+    public static void RClick(int x, int y) { SetCursorPos(x, y); mouse_event(8,0,0,0,0); mouse_event(16,0,0,0,0); }
+    public static void DblClick(int x, int y) { SetCursorPos(x, y); mouse_event(2,0,0,0,0); mouse_event(4,0,0,0,0); System.Threading.Thread.Sleep(50); mouse_event(2,0,0,0,0); mouse_event(4,0,0,0,0); }
+    public static void Key(byte vk) { keybd_event(vk,0,0,0); keybd_event(vk,0,2,0); }
+    public static void KD(byte vk) { keybd_event(vk,0,0,0); }
+    public static void KU(byte vk) { keybd_event(vk,0,2,0); }
 }
 "@
-$action = $args[0]
-switch ($action) {
-    "move"    { [ManobiInput]::MoveTo([int]$args[1], [int]$args[2]) }
-    "click"   { [ManobiInput]::LeftClick([int]$args[1], [int]$args[2]) }
-    "rclick"  { [ManobiInput]::RightClick([int]$args[1], [int]$args[2]) }
-    "dblclick"{ [ManobiInput]::DoubleClick([int]$args[1], [int]$args[2]) }
-    "key"     { [ManobiInput]::KeyPress([byte]$args[1]) }
-    "keydown" { [ManobiInput]::KeyDown([byte]$args[1]) }
-    "keyup"   { [ManobiInput]::KeyUp([byte]$args[1]) }
+Write-Host "READY"
+while ($true) {
+    $line = [Console]::ReadLine()
+    if ($line -eq $null -or $line -eq "EXIT") { break }
+    try {
+        $parts = $line.Split(' ')
+        switch ($parts[0]) {
+            "C" { [MI]::Click([int]$parts[1], [int]$parts[2]) }
+            "R" { [MI]::RClick([int]$parts[1], [int]$parts[2]) }
+            "D" { [MI]::DblClick([int]$parts[1], [int]$parts[2]) }
+            "K" { [MI]::Key([byte]$parts[1]) }
+            "KD" { [MI]::KD([byte]$parts[1]) }
+            "KU" { [MI]::KU([byte]$parts[1]) }
+        }
+    } catch {}
 }
 `;
+    const scriptPath = path.join(os.tmpdir(), 'manobi-input-daemon.ps1');
+    fs.writeFileSync(scriptPath, scriptContent);
 
-  try {
-    fs.writeFileSync(inputHelperPath, helperScript);
-    inputHelperReady = true;
-    console.log('✅ Control de input inicializado');
+    psProcess = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+      stdio: ['pipe', 'pipe', 'pipe'],
+    });
+
+    psProcess.stdout.once('data', (data) => {
+      if (data.toString().trim() === 'READY') {
+        console.log('✅ Control de input inicializado (proceso persistente)');
+      }
+    });
+
+    psProcess.on('exit', () => { psProcess = null; });
+    psProcess.stderr.on('data', () => {});
+
+    return true;
   } catch (err) {
     console.log('❌ No se pudo inicializar input:', err.message);
+    return false;
   }
 }
 
-function sendInput(action, ...args) {
-  if (!inputHelperReady) return;
-  const cmd = `powershell -NoProfile -ExecutionPolicy Bypass -File "${inputHelperPath}" ${action} ${args.join(' ')}`;
-  exec(cmd, { timeout: 2000 }, () => {});
+function sendInputCmd(cmd) {
+  if (psProcess && psProcess.stdin.writable) {
+    psProcess.stdin.write(cmd + '\n');
+  }
 }
 
 function handleMouseInput(data) {
   const absX = Math.round(data.x * screenWidth);
   const absY = Math.round(data.y * screenHeight);
 
-  if (process.platform === 'win32' && inputHelperReady) {
+  if (psProcess) {
     switch (data.type) {
-      case 'mousemove':
-        sendInput('move', absX, absY);
-        break;
-      case 'click':
-      case 'mousedown':
-        if (data.button === 2) {
-          sendInput('rclick', absX, absY);
-        } else {
-          sendInput('click', absX, absY);
-        }
-        break;
-      case 'dblclick':
-        sendInput('dblclick', absX, absY);
-        break;
-      case 'contextmenu':
-        sendInput('rclick', absX, absY);
-        break;
+      case 'click': sendInputCmd(`C ${absX} ${absY}`); break;
+      case 'dblclick': sendInputCmd(`D ${absX} ${absY}`); break;
+      case 'contextmenu': sendInputCmd(`R ${absX} ${absY}`); break;
     }
-  } else if (robot) {
-    try {
-      robot.moveMouse(absX, absY);
-      if (data.type === 'click' || data.type === 'mousedown') {
-        robot.mouseClick(data.button === 2 ? 'right' : 'left');
-      }
-    } catch {}
   }
 }
 
 function handleKeyboardInput(data) {
-  if (data.type !== 'keydown') return;
+  if (data.type !== 'keydown' || !psProcess) return;
+  const vk = mapKeyToVK(data.key);
+  if (vk === null) return;
 
-  if (process.platform === 'win32' && inputHelperReady) {
-    const vk = mapKeyToVK(data.key);
-    if (vk !== null) {
-      // Manejar modificadores
-      const mods = data.modifiers || [];
-      if (mods.includes('ctrl')) sendInput('keydown', 0x11);
-      if (mods.includes('shift')) sendInput('keydown', 0x10);
-      if (mods.includes('alt')) sendInput('keydown', 0x12);
-
-      sendInput('key', vk);
-
-      if (mods.includes('alt')) sendInput('keyup', 0x12);
-      if (mods.includes('shift')) sendInput('keyup', 0x10);
-      if (mods.includes('ctrl')) sendInput('keyup', 0x11);
-    }
-  } else if (robot) {
-    try {
-      const modifiers = (data.modifiers || []).filter(Boolean);
-      const key = mapKeyRobotJS(data.key);
-      if (key) robot.keyTap(key, modifiers);
-    } catch {}
-  }
+  const mods = data.modifiers || [];
+  if (mods.includes('ctrl')) sendInputCmd('KD 17');
+  if (mods.includes('shift')) sendInputCmd('KD 16');
+  if (mods.includes('alt')) sendInputCmd('KD 18');
+  sendInputCmd(`K ${vk}`);
+  if (mods.includes('alt')) sendInputCmd('KU 18');
+  if (mods.includes('shift')) sendInputCmd('KU 16');
+  if (mods.includes('ctrl')) sendInputCmd('KU 17');
 }
 
 function mapKeyToVK(key) {
-  const vkMap = {
-    'Enter': 0x0D, 'Backspace': 0x08, 'Tab': 0x09, 'Escape': 0x1B,
-    'Delete': 0x2E, 'Home': 0x24, 'End': 0x23, 'PageUp': 0x21, 'PageDown': 0x22,
-    'ArrowUp': 0x26, 'ArrowDown': 0x28, 'ArrowLeft': 0x25, 'ArrowRight': 0x27,
-    ' ': 0x20, 'F1': 0x70, 'F2': 0x71, 'F3': 0x72, 'F4': 0x73, 'F5': 0x74,
-    'F6': 0x75, 'F7': 0x76, 'F8': 0x77, 'F9': 0x78, 'F10': 0x79, 'F11': 0x7A, 'F12': 0x7B,
+  const map = {
+    'Enter': 13, 'Backspace': 8, 'Tab': 9, 'Escape': 27, 'Delete': 46,
+    'Home': 36, 'End': 35, 'PageUp': 33, 'PageDown': 34,
+    'ArrowUp': 38, 'ArrowDown': 40, 'ArrowLeft': 37, 'ArrowRight': 39,
+    ' ': 32, 'F1': 112, 'F2': 113, 'F3': 114, 'F4': 115, 'F5': 116,
+    'F6': 117, 'F7': 118, 'F8': 119, 'F9': 120, 'F10': 121, 'F11': 122, 'F12': 123,
   };
-  if (vkMap[key] !== undefined) return vkMap[key];
-  // Letras y números
-  if (key.length === 1) {
-    const code = key.toUpperCase().charCodeAt(0);
-    if (code >= 0x30 && code <= 0x5A) return code; // 0-9, A-Z
-  }
+  if (map[key] !== undefined) return map[key];
+  if (key.length === 1) { const c = key.toUpperCase().charCodeAt(0); if (c >= 48 && c <= 90) return c; }
   return null;
-}
-
-function mapKeyRobotJS(key) {
-  const keyMap = {
-    'Enter': 'enter', 'Backspace': 'backspace', 'Tab': 'tab',
-    'Escape': 'escape', 'Delete': 'delete', ' ': 'space',
-    'ArrowUp': 'up', 'ArrowDown': 'down', 'ArrowLeft': 'left', 'ArrowRight': 'right',
-  };
-  return keyMap[key] || (key.length === 1 ? key.toLowerCase() : null);
 }
 
 // ============================================
 // TRANSFERENCIA DE ARCHIVOS
 // ============================================
-function handleFileUpload(socket) {
-  // Recibir archivo del panel web
+function setupFileTransfer(socket) {
   socket.on('file:upload', (data, callback) => {
-    const { fileName, fileData, destPath } = data;
-    const targetPath = destPath || path.join(os.homedir(), 'Desktop', fileName);
-
+    const targetPath = data.destPath || path.join(os.homedir(), 'Desktop', data.fileName);
     try {
-      const buffer = Buffer.from(fileData, 'base64');
-      fs.writeFileSync(targetPath, buffer);
-      console.log(`📁 Archivo recibido: ${fileName} -> ${targetPath}`);
+      fs.writeFileSync(targetPath, Buffer.from(data.fileData, 'base64'));
+      console.log(`📁 Archivo recibido: ${data.fileName}`);
       if (callback) callback({ success: true, path: targetPath });
     } catch (err) {
-      console.error(`❌ Error guardando archivo: ${err.message}`);
       if (callback) callback({ success: false, error: err.message });
     }
   });
 
-  // Enviar archivo al panel web
   socket.on('file:download', (data, callback) => {
-    const { filePath } = data;
     try {
-      const buffer = fs.readFileSync(filePath);
-      const fileName = path.basename(filePath);
-      const stats = fs.statSync(filePath);
-      console.log(`📁 Enviando archivo: ${filePath}`);
-      if (callback) {
-        callback({
-          success: true,
-          fileName,
-          fileData: buffer.toString('base64'),
-          size: stats.size,
-        });
-      }
+      const buffer = fs.readFileSync(data.filePath);
+      if (callback) callback({ success: true, fileName: path.basename(data.filePath), fileData: buffer.toString('base64'), size: fs.statSync(data.filePath).size });
     } catch (err) {
-      console.error(`❌ Error leyendo archivo: ${err.message}`);
       if (callback) callback({ success: false, error: err.message });
     }
   });
 
-  // Listar archivos de un directorio
   socket.on('file:list', (data, callback) => {
     const dirPath = data.path || os.homedir();
     try {
-      const items = fs.readdirSync(dirPath, { withFileTypes: true }).map(item => ({
-        name: item.name,
-        isDirectory: item.isDirectory(),
-        path: path.join(dirPath, item.name),
-      }));
+      const items = fs.readdirSync(dirPath, { withFileTypes: true })
+        .filter(i => !i.name.startsWith('.'))
+        .map(i => ({ name: i.name, isDirectory: i.isDirectory(), path: path.join(dirPath, i.name) }));
       if (callback) callback({ success: true, items, currentPath: dirPath });
     } catch (err) {
       if (callback) callback({ success: false, error: err.message });
@@ -567,8 +444,7 @@ function main() {
   console.log('╔══════════════════════════════════════╗');
   console.log('║      Manobi-RD Agente v1.0           ║');
   console.log('║      BC Fabric SAS - Colombia        ║');
-  console.log('╚══════════════════════════════════════╝');
-  console.log('');
+  console.log('╚══════════════════════════════════════╝\n');
 
   const config = loadConfig();
   const systemInfo = getSystemInfo();
@@ -576,14 +452,12 @@ function main() {
   console.log(`Equipo: ${systemInfo.hostname}`);
   console.log(`SO: ${systemInfo.version_so}`);
   console.log(`IP: ${systemInfo.direccion_ip}`);
-  console.log(`RAM: ${systemInfo.ram_total_mb} MB`);
-  console.log(`CPU: ${systemInfo.cpu_info}`);
   console.log(`Usuario: ${systemInfo.usuario_actual}`);
   console.log(`Servidor: ${config.server_url}`);
-  console.log(`Captura: ${screenshot ? '✅ Disponible' : '❌ No disponible'}`);
-  initInputHelper();
-  console.log(`Input: ${inputHelperReady ? '✅ Nativo' : (robot ? '✅ RobotJS' : '❌ No disponible')}`);
-  console.log('');
+  console.log(`Captura: ${screenshot ? '✅' : '❌'}`);
+
+  const inputOk = initInputSystem();
+  console.log(`Input: ${inputOk ? '✅' : '❌'}\n`);
 
   const serverHttp = config.server_url.replace('ws://', 'http://').replace('wss://', 'https://');
 
@@ -601,7 +475,6 @@ function main() {
     })
     .catch(err => {
       console.error('Error registrando:', err.message);
-      console.log('Reintentando en 10 segundos...');
       setTimeout(() => main(), 10000);
     });
 }
@@ -615,60 +488,59 @@ function connectWebSocket(serverUrl, deviceToken) {
     reconnection: true,
     reconnectionDelay: 5000,
     reconnectionAttempts: Infinity,
-    maxHttpBufferSize: 10e6, // 10MB para frames
+    maxHttpBufferSize: 10e6,
   });
 
-  socket.on('connect', () => {
-    console.log('🔗 WebSocket conectado');
-  });
+  socket.on('connect', () => console.log('🔗 WebSocket conectado'));
+  socket.on('disconnect', (reason) => { console.log(`🔌 Desconectado: ${reason}`); stopStreaming(); });
 
-  socket.on('disconnect', (reason) => {
-    console.log(`🔌 Desconectado: ${reason}`);
-    stopStreaming();
-  });
-
-  // Control remoto - solicitud
-  socket.on('control:solicitud', (data) => {
+  // Solicitud de control remoto - PEDIR AUTORIZACIÓN
+  socket.on('control:solicitud', async (data) => {
     console.log(`📺 Solicitud de control - Sesión: ${data.sessionId}`);
-    startStreaming(socket, data.sessionId);
+
+    const autorizado = await showAuthorizationPopup();
+
+    if (autorizado) {
+      console.log('✅ Usuario AUTORIZÓ el control remoto');
+      socket.emit('control:autorizado', { sessionId: data.sessionId, autorizado: true });
+      startStreaming(socket, data.sessionId);
+    } else {
+      console.log('❌ Usuario RECHAZÓ el control remoto');
+      socket.emit('control:autorizado', { sessionId: data.sessionId, autorizado: false });
+    }
   });
 
-  // Control remoto - finalizar
   socket.on('control:finalizado', () => {
     stopStreaming();
+    showChatNotification('La sesion de soporte ha finalizado. Gracias por usar la Mesa de Servicios.');
   });
 
   // Input remoto
-  socket.on('input:mouse', (data) => {
-    handleMouseInput(data);
-  });
+  socket.on('input:mouse', handleMouseInput);
+  socket.on('input:teclado', handleKeyboardInput);
 
-  socket.on('input:teclado', (data) => {
-    handleKeyboardInput(data);
+  // Chat - mostrar mensajes del agente al usuario
+  socket.on('chat:recibido', (data) => {
+    console.log(`💬 Mensaje del soporte: ${data.contenido}`);
+    showChatNotification(data.contenido);
   });
 
   // Transferencia de archivos
-  handleFileUpload(socket);
+  setupFileTransfer(socket);
 
   // Heartbeat
   setInterval(() => {
-    socket.emit('heartbeat', {
-      usuario_actual: os.userInfo().username,
-    });
+    socket.emit('heartbeat', { usuario_actual: os.userInfo().username });
   }, 30000);
 
-  process.on('SIGINT', () => {
-    console.log('\nDesconectando...');
+  const cleanup = () => {
     stopStreaming();
+    if (psProcess) { psProcess.stdin.write('EXIT\n'); psProcess.kill(); }
     socket.disconnect();
     process.exit(0);
-  });
-
-  process.on('SIGTERM', () => {
-    stopStreaming();
-    socket.disconnect();
-    process.exit(0);
-  });
+  };
+  process.on('SIGINT', cleanup);
+  process.on('SIGTERM', cleanup);
 }
 
 main();
