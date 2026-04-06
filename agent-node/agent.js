@@ -135,8 +135,10 @@ Add-Type -AssemblyName System.Windows.Forms
 Add-Type -AssemblyName System.Drawing
 $enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
 $params = New-Object System.Drawing.Imaging.EncoderParameters(1)
-$params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 25L)
+$params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 20L)
 $s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+$tw = [Math]::Min(800, $s.Width)
+$th = [int]($s.Height * $tw / $s.Width)
 Write-Host "SIZE:$($s.Width)x$($s.Height)"
 Write-Host "READY"
 $f = '${captureTmpFile.replace(/\\/g, '\\\\')}'
@@ -149,8 +151,10 @@ while ($true) {
             $g = [System.Drawing.Graphics]::FromImage($b)
             $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
             $g.Dispose()
-            $b.Save($f, $enc, $params)
+            $sm = New-Object System.Drawing.Bitmap($b, $tw, $th)
             $b.Dispose()
+            $sm.Save($f, $enc, $params)
+            $sm.Dispose()
             Write-Host "OK"
         } catch { Write-Host "ERR" }
     }
