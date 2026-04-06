@@ -120,75 +120,120 @@ function sendChatMessage() {}
 function closeChatWindow() {}
 
 // ============================================
-// CAPTURA DE PANTALLA
+// CAPTURA DE PANTALLA - Proceso persistente
 // ============================================
-let captureFailCount = 0;
-const MAX_CAPTURE_FAILS = 5;
+let captureProcess = null;
+let captureReady = false;
+let captureCallback = null;
+const captureTmpFile = path.join(os.tmpdir(), 'manobi-cap.jpg');
+
+function initCaptureSystem() {
+  if (process.platform !== 'win32') return false;
+
+  const script = `
+Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName System.Drawing
+$enc = [System.Drawing.Imaging.ImageCodecInfo]::GetImageEncoders() | Where-Object { $_.MimeType -eq 'image/jpeg' }
+$params = New-Object System.Drawing.Imaging.EncoderParameters(1)
+$params.Param[0] = New-Object System.Drawing.Imaging.EncoderParameter([System.Drawing.Imaging.Encoder]::Quality, 25L)
+$s = [System.Windows.Forms.Screen]::PrimaryScreen.Bounds
+Write-Host "SIZE:$($s.Width)x$($s.Height)"
+Write-Host "READY"
+$f = '${captureTmpFile.replace(/\\/g, '\\\\')}'
+while ($true) {
+    $line = [Console]::ReadLine()
+    if ($line -eq $null -or $line -eq 'EXIT') { break }
+    if ($line -eq 'CAP') {
+        try {
+            $b = New-Object System.Drawing.Bitmap($s.Width, $s.Height)
+            $g = [System.Drawing.Graphics]::FromImage($b)
+            $g.CopyFromScreen($s.Location, [System.Drawing.Point]::Empty, $s.Size)
+            $g.Dispose()
+            $b.Save($f, $enc, $params)
+            $b.Dispose()
+            Write-Host "OK"
+        } catch { Write-Host "ERR" }
+    }
+}
+`;
+  const scriptPath = path.join(os.tmpdir(), 'manobi-capture-daemon.ps1');
+  fs.writeFileSync(scriptPath, script);
+
+  captureProcess = spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', scriptPath], {
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  captureProcess.stdout.on('data', (data) => {
+    const lines = data.toString().trim().split('\n');
+    for (const line of lines) {
+      const l = line.trim();
+      if (l.startsWith('SIZE:')) {
+        const dims = l.substring(5).split('x');
+        screenWidth = parseInt(dims[0]) || 1920;
+        screenHeight = parseInt(dims[1]) || 1080;
+        console.log(`📺 Pantalla: ${screenWidth}x${screenHeight}`);
+      }
+      if (l === 'READY') {
+        captureReady = true;
+        console.log('✅ Captura de pantalla inicializada (proceso persistente)');
+      }
+      if ((l === 'OK' || l === 'ERR') && captureCallback) {
+        captureCallback(l === 'OK');
+        captureCallback = null;
+      }
+    }
+  });
+
+  captureProcess.on('exit', () => { captureProcess = null; captureReady = false; });
+  captureProcess.stderr.on('data', () => {});
+
+  return true;
+}
+
+function captureScreenFast() {
+  return new Promise((resolve) => {
+    if (!captureProcess || !captureReady) {
+      resolve(null);
+      return;
+    }
+    captureCallback = (success) => {
+      if (!success) { resolve(null); return; }
+      try {
+        const buf = fs.readFileSync(captureTmpFile);
+        resolve(buf.toString('base64'));
+      } catch { resolve(null); }
+    };
+    captureProcess.stdin.write('CAP\n');
+    // Timeout de seguridad
+    setTimeout(() => { if (captureCallback) { captureCallback = null; resolve(null); } }, 2000);
+  });
+}
 
 async function captureScreen() {
-  if (captureFailCount >= MAX_CAPTURE_FAILS) return await createPlaceholderFrame();
+  // Método 1: Proceso persistente (más rápido)
+  if (captureReady) {
+    const frame = await captureScreenFast();
+    if (frame) return frame;
+  }
 
+  // Método 2: screenshot-desktop (fallback)
   if (screenshot) {
     try {
       const imgBuffer = await screenshot({ format: 'jpg' });
-      captureFailCount = 0;
       if (sharp) {
-        if (screenWidth === 1920) {
-          // Leer dimensiones solo una vez
-          const metadata = await sharp(imgBuffer).metadata();
-          screenWidth = metadata.width || 1920;
-          screenHeight = metadata.height || 1080;
-        }
-        const compressed = await sharp(imgBuffer)
-          .resize(960, 540, { fit: 'inside', withoutEnlargement: true })
-          .jpeg({ quality: 30, mozjpeg: true })
-          .toBuffer();
-        return compressed.toString('base64');
+        return (await sharp(imgBuffer).resize(960, 540, { fit: 'inside' }).jpeg({ quality: 25 }).toBuffer()).toString('base64');
       }
       return imgBuffer.toString('base64');
     } catch {}
   }
 
-  if (process.platform === 'win32') {
-    try {
-      const result = await captureWithPowerShell();
-      if (result) { captureFailCount = 0; return result; }
-    } catch {}
-  }
-
-  captureFailCount++;
-  if (captureFailCount >= MAX_CAPTURE_FAILS) console.log('Captura no disponible. Usando placeholder.');
-  return await createPlaceholderFrame();
-}
-
-function captureWithPowerShell() {
-  return new Promise((resolve, reject) => {
-    const tmpFile = path.join(os.tmpdir(), 'manobi-screen.jpg');
-    const psScript = `Add-Type -AssemblyName System.Windows.Forms; Add-Type -AssemblyName System.Drawing; $s=[System.Windows.Forms.Screen]::PrimaryScreen.Bounds; $b=New-Object System.Drawing.Bitmap($s.Width,$s.Height); $g=[System.Drawing.Graphics]::FromImage($b); $g.CopyFromScreen($s.Location,[System.Drawing.Point]::Empty,$s.Size); $b.Save('${tmpFile.replace(/\\/g, '\\\\')}', [System.Drawing.Imaging.ImageFormat]::Jpeg); $g.Dispose(); $b.Dispose(); Write-Output "$($s.Width)x$($s.Height)"`;
-
-    exec(`powershell -NoProfile -Command "${psScript}"`, { timeout: 5000 }, (err, stdout) => {
-      if (err) return reject(err);
-      try {
-        const dims = stdout.trim().split('x');
-        if (dims.length === 2) { screenWidth = parseInt(dims[0]) || 1920; screenHeight = parseInt(dims[1]) || 1080; }
-        const imgBuffer = fs.readFileSync(tmpFile);
-        try { fs.unlinkSync(tmpFile); } catch {}
-        if (sharp) {
-          sharp(imgBuffer).resize(960, 540, { fit: 'inside', withoutEnlargement: true }).jpeg({ quality: 30, mozjpeg: true }).toBuffer()
-            .then(buf => resolve(buf.toString('base64'))).catch(() => resolve(imgBuffer.toString('base64')));
-        } else { resolve(imgBuffer.toString('base64')); }
-      } catch (e) { reject(e); }
-    });
-  });
-}
-
-async function createPlaceholderFrame() {
-  const svg = `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#1a1a2e"/><text x="640" y="340" font-family="monospace" font-size="28" fill="#e94560" text-anchor="middle">Manobi-RD - ${os.hostname()}</text><text x="640" y="380" font-family="monospace" font-size="16" fill="#888" text-anchor="middle">Sin display grafico disponible</text></svg>`;
-  if (sharp) { try { return (await sharp(Buffer.from(svg)).jpeg({ quality: 60 }).toBuffer()).toString('base64'); } catch {} }
+  // Placeholder
+  const svg = `<svg width="1280" height="720" xmlns="http://www.w3.org/2000/svg"><rect width="100%" height="100%" fill="#1a1a2e"/><text x="640" y="340" font-family="monospace" font-size="28" fill="#e94560" text-anchor="middle">Manobi-RD - ${os.hostname()}</text></svg>`;
   return Buffer.from(svg).toString('base64');
 }
 
 let lastFrameSize = 0;
+let capturing = false;
 
 function startStreaming(socket, sessionId) {
   if (isStreaming) stopStreaming();
@@ -197,15 +242,20 @@ function startStreaming(socket, sessionId) {
   lastFrameSize = 0;
   console.log(`📺 Streaming iniciado: ${sessionId}`);
 
-  streamingInterval = setInterval(async () => {
+  async function captureLoop() {
+    if (!isStreaming || capturing) return;
+    capturing = true;
     try {
       const frame = await captureScreen();
-      // Solo saltar si el tamaño es exactamente igual (pantalla estática)
-      if (frame.length === lastFrameSize) return;
-      lastFrameSize = frame.length;
-      socket.volatile.emit('screen:frame', { sessionId, frame, width: screenWidth, height: screenHeight, timestamp: Date.now() });
+      if (frame && frame.length !== lastFrameSize && isStreaming) {
+        lastFrameSize = frame.length;
+        socket.volatile.emit('screen:frame', { sessionId, frame, width: screenWidth, height: screenHeight, timestamp: Date.now() });
+      }
     } catch {}
-  }, 100); // ~10 FPS
+    capturing = false;
+    if (isStreaming) setTimeout(captureLoop, 80); // ~12 FPS max
+  }
+  captureLoop();
 }
 
 function stopStreaming() {
@@ -438,7 +488,8 @@ function main() {
   console.log(`IP: ${systemInfo.direccion_ip}`);
   console.log(`Usuario: ${systemInfo.usuario_actual}`);
   console.log(`Servidor: ${config.server_url}`);
-  console.log(`Captura: ${screenshot ? '✅' : '❌'}`);
+  const captureOk = initCaptureSystem();
+  console.log(`Captura: ${captureOk ? '✅ Persistente' : (screenshot ? '✅ Libreria' : '❌')}`);
 
   const inputOk = initInputSystem();
   console.log(`Input: ${inputOk ? '✅' : '❌'}\n`);
@@ -522,6 +573,7 @@ function connectWebSocket(serverUrl, deviceToken) {
     stopStreaming();
     closeChatWindow();
     if (psProcess) { try { psProcess.stdin.write('EXIT\n'); psProcess.kill(); } catch {} }
+    if (captureProcess) { try { captureProcess.stdin.write('EXIT\n'); captureProcess.kill(); } catch {} }
     socket.disconnect();
     process.exit(0);
   };
